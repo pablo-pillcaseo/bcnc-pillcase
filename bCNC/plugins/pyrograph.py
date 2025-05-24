@@ -111,7 +111,7 @@ class Tool(Plugin):
             newHeight = int(divisions)
 
         # Create a thumbnail image to work faster
-        img.thumbnail((newWidth, newHeight), Image.LANCZOS)
+        img.thumbnail((newWidth, newHeight), Image.ANTIALIAS)
         newWidth, newHeight = img.size
         pixels = list(img.getdata())
 

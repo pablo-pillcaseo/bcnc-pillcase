@@ -216,11 +216,10 @@ class Controller(_GenericGRBL):
                     break
 
         # Machine is Idle buffer is empty stop waiting and go on
-        main_state = fields[0].split(":")[0]
         if (
             self.master.sio_wait
             and not cline
-            and main_state not in ("Run", "Jog", "Hold")
+            and fields[0] not in ("Run", "Jog", "Hold")
         ):
             self.master.sio_wait = False
             self.master._gcount += 1

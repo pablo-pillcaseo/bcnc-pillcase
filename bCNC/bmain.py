@@ -76,6 +76,7 @@ from ControlPage import ControlPage
 from EditorPage import EditorPage
 from FilePage import FilePage
 from ProbePage import ProbePage
+from SurfAlignPage import SurfAlignPage
 from Sender import NOT_CONNECTED, STATECOLOR, STATECOLORDEF, Sender
 from TerminalPage import TerminalPage
 from ToolsPage import Tools, ToolsPage
@@ -245,6 +246,7 @@ class Application(Tk, Sender):
             EditorPage,
             FilePage,
             ProbePage,
+            SurfAlignPage,
             TerminalPage,
             ToolsPage,
         ):
@@ -301,6 +303,7 @@ class Application(Tk, Sender):
 
         # Left side
         for name in Utils.getStr(Utils.__prg__, "ribbon").split():
+            # print("Ribbon name: ", name)
             last = name[-1]
             if last == ">":
                 name = name[:-1]
@@ -334,6 +337,8 @@ class Application(Tk, Sender):
         self.bind("<<Paste>>", self.paste)
 
         self.bind("<<Connect>>", self.openClose)
+        
+        self.bind("<<BLTConnect>>", self.openCloseBLTouch)
 
         self.bind("<<New>>", self.newFile)
         self.bind("<<Open>>", self.loadDialog)
@@ -1352,7 +1357,7 @@ class Application(Tk, Sender):
         focus = self.focus_get()
         if focus in (self.canvas, self.editor):
             self.editor.copy()
-            self.ribbon.changePage("Editor")
+            # self.ribbon.changePage("Editor")
             self.editor.selectAll()
             self.selectionChange()
             return "break"
@@ -1463,6 +1468,9 @@ class Application(Tk, Sender):
 
         elif rexx.abbrev("AUTOLEVEL", cmd, 4):
             self.executeOnSelection("AUTOLEVEL", True)
+            
+        elif cmd == "SURF_ALIGN":
+            self.executeOnSelection("SURF_ALIGN", True)
 
         # CAM*ERA: camera actions
         elif rexx.abbrev("CAMERA", cmd, 3):
@@ -1987,6 +1995,8 @@ class Application(Tk, Sender):
         sel = None
         if cmd == "AUTOLEVEL":
             sel = self.gcode.autolevel(items)
+        elif cmd == "SURF_ALIGN":
+            sel = self.gcode.surf_align_gcode(items)
         elif cmd == "CUT":
             sel = self.gcode.cut(items, *args)
         elif cmd == "CLOSE":
@@ -2318,6 +2328,10 @@ class Application(Tk, Sender):
 
     # -----------------------------------------------------------------------
     def fileModified(self):
+        page = self.ribbon.getActivePage()
+        # Skip message box if SurfAlign page is active
+        if page.name == "SurfAlign":
+            return False
         if self.gcode.isModified():
             ans = messagebox.askquestion(
                 _("File modified"),
@@ -2358,13 +2372,18 @@ class Application(Tk, Sender):
                 return
 
             if not self.gcode.probe.isEmpty():
-                ans = messagebox.askquestion(
-                    _("Existing Autolevel"),
-                    _("Autolevel/probe information already exists.\nDelete it?"),
-                    parent=self,
-                )
-                if ans == messagebox.YES or ans is True:
+                # Skip message box if SurfAlign page is active
+                page = self.ribbon.getActivePage()
+                if page.name == "SurfAlign":
                     self.gcode.probe.init()
+                else:
+                    ans = messagebox.askquestion(
+                        _("Existing Autolevel"),
+                        _("Autolevel/probe information already exists.\nDelete it?"),
+                        parent=self,
+                    )
+                    if ans == messagebox.YES or ans is True:
+                        self.gcode.probe.init()
 
         self.setStatus(_("Loading: {} ...").format(filename), True)
         Sender.load(self, filename)
@@ -2437,7 +2456,7 @@ class Application(Tk, Sender):
         if filename:
             fn, ext = os.path.splitext(filename)
             ext = ext.lower()
-            gcode = GCode()
+            gcode = GCode(self)
             if ext == ".dxf":
                 gcode.importDXF(filename)
             elif ext == ".svg":
@@ -2523,6 +2542,41 @@ class Application(Tk, Sender):
             pass
 
     # -----------------------------------------------------------------------
+    def openCloseBLTouch(self, event=None):
+        serialPage = Page.frames["BLTouch"]
+        if self.blt_serial is not None:
+            self.blt_serial_close()
+            serialPage.connectBtn.config(
+                text=_("Open"), background="Salmon", activebackground="Salmon"
+            )
+        else:
+            device = serialPage.portCombo.get()
+            baudrate = serialPage.baudCombo.get()
+            if self.blt_serial_open(device, baudrate):
+                serialPage.connectBtn.config(
+                    text=_("Close"), background="LightGreen", activebackground="LightGreen"
+                )
+                
+    # -----------------------------------------------------------------------
+    def blt_serial_open(self, device, baudrate):
+        try:
+            return Sender.blt_serial_open(self, device, baudrate)
+        except Exception:
+            self.blt_serial = None
+            messagebox.showerror(
+                _("Error opening serial"), sys.exc_info()[1], parent=self
+            )
+        return False
+    
+    # -----------------------------------------------------------------------
+    def blt_serial_close(self):
+        Sender.blt_serial_close(self)
+        
+    # -----------------------------------------------------------------------
+    def blt_serial_send(self, cmd):
+        return Sender.blt_serial_send(self, cmd)
+
+    # -----------------------------------------------------------------------
     # An entry function should be called periodically during compiling
     # to check if the Pause or Stop buttons are pressed
     # @return true if the compile has to abort
@@ -2554,6 +2608,7 @@ class Application(Tk, Sender):
                 _("Already running"), _("Please stop before"), parent=self
             )
             return
+
 
         self.editor.selectClear()
         self.selectionChange()

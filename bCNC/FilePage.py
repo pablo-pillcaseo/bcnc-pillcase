@@ -438,6 +438,218 @@ class SerialFrame(CNCRibbon.PageLabelFrame):
         Utils.setBool("Connection", "openserial", self.autostart.get())
 
 
+
+
+class BLTouchSerialFrame(CNCRibbon.PageLabelFrame):
+    def __init__(self, master, app):
+        CNCRibbon.PageLabelFrame.__init__(
+            self, master, "BLTouch", _("BLTouch"), app)
+        self.autostart = BooleanVar()
+
+        # ---
+        col, row = 0, 0
+        b = Label(self, text=_("Port:"))
+        b.grid(row=row, column=col, sticky=E)
+        self.addWidget(b)
+
+        self.portCombo = tkExtra.Combobox(
+            self,
+            False,
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+            width=16,
+            command=self.comportClean,
+        )
+        self.portCombo.grid(row=row, column=col + 1, sticky=EW)
+        tkExtra.Balloon.set(
+            self.portCombo, _("Select (or manual enter) port to connect")
+        )
+        self.portCombo.set(Utils.getStr("BLTouch", "port"))
+        self.addWidget(self.portCombo)
+
+        self.comportRefresh()
+
+        # ---
+        row += 1
+        b = Label(self, text=_("Baud:"))
+        b.grid(row=row, column=col, sticky=E)
+
+        self.baudCombo = tkExtra.Combobox(
+            self, True, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.baudCombo.grid(row=row, column=col + 1, sticky=EW)
+        tkExtra.Balloon.set(self.baudCombo, _("Select connection baud rate"))
+        self.baudCombo.fill(BAUDS)
+        self.baudCombo.set(Utils.getStr("BLTouch", "baud", "9600"))
+        self.addWidget(self.baudCombo)
+
+
+        # ---
+        row += 1
+        b = Checkbutton(self, text=_("Connect on startup"),
+                        variable=self.autostart)
+        b.grid(row=row, column=col, columnspan=2, sticky=W)
+        tkExtra.Balloon.set(
+            b, _("Connect to serial on startup of the program"))
+        self.autostart.set(Utils.getBool("BLTouch", "openserial"))
+        self.addWidget(b)
+        
+
+# --- Adjusted Button Placement ---
+        refresh_col = 2
+        connect_col = 3
+
+        # Place Refresh button next to Baud
+        self.comrefBtn = Ribbon.LabelButton(
+            self,
+            image=Utils.icons["refresh"],
+            text=_("Refresh"),
+            compound=TOP,
+            command=lambda s=self: s.comportRefresh(True),
+            background=Ribbon._BACKGROUND,
+        )
+        self.comrefBtn.grid(row=0, column=refresh_col, rowspan=2,padx=0, pady=0, sticky=NSEW)
+        tkExtra.Balloon.set(self.comrefBtn, _("Refresh list of serial ports"))
+
+        # Place Connect button aligned with Port/Baud section
+        self.connectBtn = Ribbon.LabelButton(
+            self,
+            image=Utils.icons["serial48"],
+            text=_("Open"),
+            compound=TOP,
+            command=lambda s=self: s.event_generate("<<BLTConnect>>"),
+            background=Ribbon._BACKGROUND,
+        )
+        self.connectBtn.grid(row=0, column=connect_col, rowspan=3, padx=0, pady=0, sticky=NSEW)
+        tkExtra.Balloon.set(self.connectBtn, _("Open/Close serial port"))
+        
+        row += 1
+
+        # Add Deploy and Retract buttons
+        col, row = 0, 3  # Start in a new row
+        self.deployBtn = Ribbon.LabelButton(
+            self,
+            text=_("Deploy"),
+            # image=Utils.icons["start_pendant"],  # Using existing icon, you may want to change this
+            compound=LEFT,
+            anchor=W,
+            command=lambda s=self: s.app.blt_serial_send('1'),
+            background=Ribbon._BACKGROUND,
+        )
+        self.deployBtn.grid(row=row, column=col, padx=0, pady=0, sticky=EW)
+        tkExtra.Balloon.set(self.deployBtn, _("Deploy BLTouch probe"))
+        self.addWidget(self.deployBtn)
+
+        col += 1
+        self.retractBtn = Ribbon.LabelButton(
+            self,
+            text=_("Retract"),
+            # image=Utils.icons["stop_pendant"],  # Using existing icon, you may want to change this
+            compound=LEFT,
+            anchor=W,
+            command=lambda s=self: s.app.blt_serial_send('2'),
+            background=Ribbon._BACKGROUND,
+        )
+        self.retractBtn.grid(row=row, column=col, padx=0, pady=0, sticky=EW)
+        tkExtra.Balloon.set(self.retractBtn, _("Retract BLTouch probe"))
+        self.addWidget(self.retractBtn)
+
+        col += 1
+        self.testBtn = Ribbon.LabelButton(
+            self,
+            text=_("Test"),
+            # image=Utils.icons["debug"],  # Using debug icon as placeholder
+            compound=LEFT,
+            anchor=W,
+            command=lambda s=self: s.app.blt_serial_send('3'),
+            background=Ribbon._BACKGROUND,
+        )
+        self.testBtn.grid(row=row, column=col, padx=0, pady=0, sticky=EW)
+        tkExtra.Balloon.set(self.testBtn, _("Test BLTouch probe"))
+        self.addWidget(self.testBtn)
+
+        col += 1
+        self.resetBtn = Ribbon.LabelButton(
+            self,
+            text=_("Reset"),
+            # image=Utils.icons["refresh"],  # Using refresh icon as placeholder
+            compound=LEFT,
+            anchor=W,
+            command=lambda s=self: s.app.blt_serial_send('4'),
+            background=Ribbon._BACKGROUND,
+        )
+        self.resetBtn.grid(row=row, column=col, padx=0, pady=0, sticky=EW)
+        tkExtra.Balloon.set(self.resetBtn, _("Reset BLTouch probe"))
+        self.addWidget(self.resetBtn)
+
+        # Grid column layout
+        self.grid_columnconfigure(1, weight=1)
+
+
+    # -----------------------------------------------------------------------
+    def comportClean(self, event=None):
+        clean = self.portCombo.get().split("\t")[0]
+        if self.portCombo.get() != clean:
+            print("comport fix")
+            self.portCombo.set(clean)
+
+    # -----------------------------------------------------------------------
+    def comportsGet(self):
+        try:
+            return comports(include_links=True)
+        except TypeError:
+            print("Using old style comports()!")
+            return comports()
+
+    def comportRefresh(self, dbg=False):
+        # Detect devices
+        hwgrep = []
+        for i in self.comportsGet():
+            if dbg:
+                # Print list to console if requested
+                comport = ""
+                for j in i:
+                    comport += j + "\t"
+                print(comport)
+            for hw in i[2].split(" "):
+                hwgrep += ["hwgrep://" + hw + "\t" + i[1]]
+
+        # Populate combobox
+        devices = sorted(x[0] + "\t" + x[1] for x in self.comportsGet())
+        devices += [""]
+        devices += sorted(set(hwgrep))
+        devices += [""]
+        # Pyserial raw spy currently broken in python3
+        # TODO: search for python3 replacement for raw spy
+        if sys.version_info[0] != 3:
+            devices += sorted(
+                "spy://" + x[0] + "?raw&color" + "\t(Debug) " + x[1]
+                for x in self.comportsGet()
+            )
+        else:
+            devices += sorted(
+                "spy://" + x[0] + "?color" + "\t(Debug) " + x[1]
+                for x in self.comportsGet()
+            )
+        devices += ["", "socket://localhost:23", "rfc2217://localhost:2217"]
+
+        # Clean neighbour duplicates
+        devices_clean = []
+        devprev = ""
+        for i in devices:
+            if i.split("\t")[0] != devprev:
+                devices_clean += [i]
+            devprev = i.split("\t")[0]
+
+        self.portCombo.fill(devices_clean)
+
+    # -----------------------------------------------------------------------
+    def saveConfig(self):
+        # Connection
+        Utils.setStr("BLTouch", "port", self.portCombo.get().split("\t")[0])
+        Utils.setStr("BLTouch", "baud", self.baudCombo.get())
+        Utils.setBool("BLTouch", "openserial", self.autostart.get())
+
+
 # =============================================================================
 # File Page
 # =============================================================================
@@ -451,5 +663,5 @@ class FilePage(CNCRibbon.Page):
     # ----------------------------------------------------------------------
     def register(self):
         self._register(
-            (FileGroup, PendantGroup, OptionsGroup, CloseGroup), (SerialFrame,)
+            (FileGroup, PendantGroup, OptionsGroup, CloseGroup), (SerialFrame, BLTouchSerialFrame)
         )

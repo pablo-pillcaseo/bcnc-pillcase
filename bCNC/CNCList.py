@@ -886,6 +886,15 @@ class CNCListbox(Listbox):
             blocks[block] = True
         return list(sorted(blocks.keys()))
 
+    def getAllBlocks(self):
+        self.selection_set(0, END)
+        blocks = {}
+        for i in self.curselection():
+            block, line = self._items[int(i)]
+            blocks[block] = True
+        return list(sorted(blocks.keys()))
+
+
     # ----------------------------------------------------------------------
     # Return list of [(blocks,lines),...] currently being selected
     # Filtering all items that the block is also selected

@@ -58,7 +58,7 @@ except Exception:
 
 __author__ = "Vasilis Vlachoudis"
 __email__ = "vvlachoudis@gmail.com"
-__version__ = "0.9.16"
+__version__ = "0.9.15"
 __date__ = "24 June 2022"
 __prg__ = "bCNC"
 
@@ -81,6 +81,7 @@ iniSystem = os.path.join(prgpath, f"{__prg__}.ini")
 iniUser = os.path.expanduser(f"~/.{__prg__}")
 hisFile = os.path.expanduser(f"~/.{__prg__}.history")
 
+print(f"[INFO] iniUser Path: {iniUser}")
 
 _ = gettext.translation(
     "bCNC", os.path.join(prgpath, "locale"), fallback=True

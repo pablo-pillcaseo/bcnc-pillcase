@@ -260,7 +260,7 @@ class Tool(Plugin):
         resampleRatio = 800.0 / iHeight
         img = img.resize(
             (int(iWidth * resampleRatio),
-             int(iHeight * resampleRatio)), Image.LANCZOS
+             int(iHeight * resampleRatio)), Image.ANTIALIAS
         )
         if channel == "Blue":
             img = img.convert("RGB")

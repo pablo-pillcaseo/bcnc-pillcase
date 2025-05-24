@@ -92,7 +92,8 @@ class Sender:
         self.controllerSet("GRBL1")
 
         CNC.loadConfig(Utils.config)
-        self.gcode = GCode()
+        self.gcode = GCode(self)
+
         self.cnc = self.gcode.cnc
 
         self.log = Queue()  # Log queue returned from GRBL
@@ -100,6 +101,9 @@ class Sender:
         self.pendant = Queue()  # Command queue to be executed from Pendant
         self.serial = None
         self.thread = None
+        
+        # BLTouc
+        self.blt_serial = None
 
         self._posUpdate = False  # Update position
         self._probeUpdate = False  # Update probe
@@ -539,6 +543,62 @@ class Sender:
         self.serial = None
         CNC.vars["state"] = NOT_CONNECTED
         CNC.vars["color"] = STATECOLOR[CNC.vars["state"]]
+
+    # ----------------------------------------------------------------------
+    # BLTouch Serial
+    # ----------------------------------------------------------------------
+    def blt_serial_open(self, device, baudrate):
+        self.blt_serial = serial.serial_for_url(
+            device.replace("\\", "\\\\"),  # Escape for windows
+            baudrate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=SERIAL_TIMEOUT,
+            xonxoff=False,
+            rtscts=False,
+        )
+        try:
+            self.blt_serial.setDTR(0)
+        except OSError:
+            pass
+        time.sleep(1)
+        CNC.vars["blt_state"] = CONNECTED
+        return True
+    
+    def blt_serial_close(self):
+        if self.blt_serial is None:
+            return
+        try:
+            self.blt_serial.close()
+        except Exception:
+            pass
+        self.blt_serial = None
+        CNC.vars["blt_state"] = NOT_CONNECTED
+
+    def blt_serial_send(self, cmd):
+        """
+        Send a single-character command ('1', '2', '3', or '4') to the BLTouch.
+        """
+        if self.blt_serial is None:
+            print("[ERROR] BLTouch Serial port not initialized.")
+            return False
+
+        if cmd in ['1', '2', '3', '4']:
+            self.blt_serial.write(cmd.encode())
+            print(f"[INFO] Sent command: {cmd}")
+            time.sleep(0.2)  # Wait briefly for response
+
+            if self.blt_serial.in_waiting:
+                response = self.blt_serial.readline().decode(errors='ignore').strip()
+                print(f"[INFO] Response: {response}")
+                return response
+            else:
+                print("[INFO] No response received.")
+                return True #TODO NEED TO CORRECT WITH RETURN FALSE
+        else:
+            print("[WARN] Invalid command. Use '1', '2', '3', or '4'.")
+            return False
 
     # ----------------------------------------------------------------------
     # Send to controller a gcode or command

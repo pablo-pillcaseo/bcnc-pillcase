@@ -8,7 +8,6 @@ from ToolsPage import Plugin
 from PIL.FontFile import FontFile
 from shxparser.shxparser import ShxFont,ShxPath
 from svgelements import Arc
-
 __author__ = "Filippo Rivato"
 __email__ = "f.rivato@gmail.com"
 
@@ -105,26 +104,18 @@ class Tool(Plugin):
     def shxtoGcode(self,path,block,depth,app):
         block.append(CNC.zsafe())
         block.append(CNC.gcode(1, [("f", CNC.vars["cutfeed"])]))
-        last_element = []
         for element in path:
-            if element is None:
+            if element is None :
                 break
-            if len(element) == 2:
+            if len (element) == 2 :
                 block.append("( ---------- cut-here ---------- )")
-                if last_element == element:
-                    continue
                 block.append(CNC.zsafe())
-            elif len(element) == 4:
-                if len(last_element) == 2:
-                    block.append(CNC.grapid(element[0], element[1]))
+                block.append(CNC.grapid(element[0] , element[1]))
                 block.append(CNC.zenter(depth))
                 block.append(CNC.gcode(1, [("f", CNC.vars["cutfeed"])]))
+            elif len(element)==4 :
                 block.append(CNC.gline(element[2],element[3]))
-            elif len(element) == 6:
-                if len(last_element) == 2:
-                    block.append(CNC.grapid(element[0], element[1]))
-                block.append(CNC.zenter(depth))
-                block.append(CNC.gcode(1, [("f", CNC.vars["cutfeed"])]))
+            elif len(element)==6 : 
                 x0 = element[0]
                 y0 = element[1]
                 x1 = element[2]
@@ -139,8 +130,6 @@ class Tool(Plugin):
                     p2 = arc.point(t+step)
                     t += step
                     block.append(CNC.gline(p2[0],p2[1]))
-            last_element = element
-
         # Gcode Zsafe
         block.append(CNC.zsafe())
         self.blocks.append(block)
@@ -150,7 +139,7 @@ class Tool(Plugin):
         app.gcode.insBlocks(active, self.blocks, "Text")
         app.refresh()
         app.setStatus("Generated Text")
-
+        
     def ttftoGcode(self,fontFileName,textToWrite,closed,fontSize,depth,block,app):
         try:
             import ttf
