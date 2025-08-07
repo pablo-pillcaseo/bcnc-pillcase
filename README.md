@@ -1,168 +1,236 @@
-bCNC
-====
+# bCNC Setup and Run Guide
 
-GrblHAL (formerly GRBL) CNC command sender, autoleveler, g-code editor, digitizer, CAM
-and swiss army knife for all your CNC needs.
+## **Complete Process (3 Simple Steps)**
 
-An advanced fully featured g-code sender for grblHAL (formerly GRBL). bCNC is a cross platform program (Windows, Linux, Mac) written in python. The sender is robust and fast able to work nicely with old or slow hardware like [Raspberry Pi](http://www.openbuilds.com/threads/bcnc-and-the-raspberry-pi.3038/) (As it was validated by the GRBL maintainer on heavy testing).
+### **Step 1: Clone Repository**
+```batch
+git clone https://github.com/pablo-pillcaseo/bcnc-pillcase
+```
 
-## IMPORTANT! If you have any troubles using bCNC, please read [WIKI](https://github.com/vlachoudis/bCNC/wiki) and [DISCUSS](https://github.com/vlachoudis/bCNC/discussions) it first. Only create new [issues](https://github.com/vlachoudis/bCNC/issues) when you are certain there is a problem with actual bCNC code.
+**What this does:**
+- Downloads the complete bCNC project from GitHub
+- Creates a `bcnc-pillcase` folder with all source code
 
-[![Build Status](https://travis-ci.com/vlachoudis/bCNC.svg?branch=master)](https://travis-ci.com/vlachoudis/bCNC)
-[![CodeFactor](https://www.codefactor.io/repository/github/vlachoudis/bcnc/badge)](https://www.codefactor.io/repository/github/vlachoudis/bcnc)
+---
 
-All pull requests that do change GUI should have attached screenshots of GUI before and after the changes.
-Please note that all pull requests should pass the Travis-CI build in order to get merged.https://github.com/Harvie/cnc-simulator
-Most pull requests should also pass CodeFactor checks if there is not good reason for failure.
-Before making pull request, please test your code on ~~both python2 and~~ python3.
+### **Step 2: Open Folder and Run Setup Script**
+1. **Open the `bcnc-pillcase` folder** in Windows Explorer
+2. **Double-click** on `update_and_setup.bat` to run it
 
-![bCNC screenshot](https://raw.githubusercontent.com/vlachoudis/bCNC/doc/Screenshots/bCNC.png)
+*Alternative (Command Line):*
+```batch
+cd bcnc-pillcase
+update_and_setup.bat
+```
 
-# Installation (using pip = recommended!)
+**What this script does automatically:**
+- ✅ **Git Operations**: Fetches latest updates, discards local changes
+- ✅ **Python Check**: Verifies Python 3.11 is installed
+- ✅ **Auto-Install Python**: Installs Python 3.11 if missing (using winget)
+- ✅ **Virtual Environment**: Creates `env` folder with isolated Python environment
+- ✅ **Dependencies**: Installs all required packages from `requirements.txt`
+- ✅ **Environment Setup**: Configures everything needed to run bCNC
 
-This is a short overview of the installation process, for more details see the ![bCNC installation](https://github.com/vlachoudis/bCNC/wiki/Installation) wiki page.
+**Expected Output:**
+```
+===============================
+Checking for Git and updating code...
+===============================
+✅ Git repository found.
+Fetching latest changes from remote...
+✅ Successfully fetched latest changes.
+Pulling latest changes...
+✅ Successfully updated to latest code.
 
-This is how you install (or upgrade) bCNC along with all required packages.
-You can use any of these commands (you need only one):
+===============================
+Checking for Python 3.11
+===============================
+Found Python version: Python 3.11.x
 
-    pip install --upgrade bCNC
-    pip install --upgrade git+https://github.com/vlachoudis/bCNC
-    pip install . #in git directory
-    python -m pip install --upgrade bCNC
+===============================
+Creating virtual environment...
+===============================
+===============================
+Activating virtual environment...
+===============================
+===============================
+Installing requirements...
+===============================
+✅ Environment setup complete!
+```
 
-This is how you launch bCNC:
+---
 
-    python -m bCNC
+### **Step 3: Run bCNC**
+1. **In the same folder**, double-click on `run_bCNC.bat` to launch bCNC
 
-Only problem with this approach is that it might not install Tkinter in some cases.
-So please keep that in mind and make sure it's installed in case of problems.
+*Alternative (Command Line):*
+```batch
+run_bCNC.bat
+```
 
-If you run the `python -m bCNC` command in root directory of this git repository it will launch the git version.
-Every developer should always use this to launch bCNC to ensure that his/her code will work after packaging.
+**What this does:**
+- Activates the virtual environment
+- Launches the bCNC application
+- Opens the bCNC GUI interface
 
-Note that on Windows XP you have to use `pyserial==3.0.1` or older as newer version do not work on XP.
+---
 
-PyPI project: https://pypi.org/project/bCNC/
+### **Step 4: Update bCNC (When Needed)**
+1. **In the same folder**, double-click on `update_and_setup.bat` to get latest updates
 
-# Installation (manual)
-You will need the following packages to run bCNC
-- tkinter the graphical toolkit for python
-  Depending your python/OS it can either be already installed,
-  or under the names tkinter, python3-tkinter, python-tk
-- pyserial or under the name python-serial, python-pyserial
-- numpy
-- Optionally:
-- python-imaging-tk: the PIL libraries for autolevel height map
-- python-opencv: for webcam streaming on web pendant
-- scipy: for 100 times faster 3D mesh slicing
+*Alternative (Command Line):*
+```batch
+update_and_setup.bat
+```
 
-Expand the directory or download it from github
-and run the bCNC command
+**What this does:**
+- Fetches latest code from GitHub
+- Updates to newest version
+- Reinstalls dependencies if needed
+- Keeps your environment ready
 
-# Installation (Linux package maintainers)
-- Copy `bCNC` subdirectory of this repo to `/usr/lib/python3.x/site-packages/`
-- Launch using `python -m bCNC` or install bCNC.sh to /usr/bin
-- Alternatively you can fetch the bCNC Python package using pip when building Linux package
-  - refer to your distro, eg.: https://wiki.archlinux.org/index.php/Python_package_guidelines
-  - Py2deb to build Debian package from Python package: https://pypi.org/project/py2deb/
 
-# Installation (Compile to Windows .exe)
 
-Note that you might probably find some precompiled .exe files on github "releases" page:
-https://github.com/vlachoudis/bCNC/releases
-But they might not be up to date.
+---
 
-This is basic example of how to compile bCNC to .exe file.
-(given that you have working bCNC in the first place, eg. using `pip install bCNC`).
-Go to the directory where is your bCNC installed and do the following:
+## **What Each Script Does**
 
-    pip install pyinstaller
-    pyinstaller --onefile --distpath . --hidden-import tkinter --paths lib;plugins;controllers --icon bCNC.ico --name bCNC __main__.py
+### **`update_and_setup.bat`**
+```batch
+# This script handles:
+1. Git repository management (fetch & update latest code)
+2. Python installation (if needed)
+3. Virtual environment creation
+4. Dependency installation
+5. Environment configuration
 
-This will take a minute or two. But in the end it should create `bCNC.exe`.
-Also note that there is `make-exe.bat` file which will do just that for you.
-This will also create rather large "build" subdirectory.
-That is solely for caching purposes and you should delete it before redistributing!
+# Can be used for:
+- Initial setup (first time)
+- Updates (any time to get latest version)
+```
 
-If you are going to report bugs in .exe version of bCNC,
-please check first if that bug occurs even when running directly in python (without .exe build).
+### **`run_bCNC.bat`**
+```batch
+# This script should contain:
+@echo off
+call env\Scripts\activate.bat
+python bCNC\bCNC.py
+pause
+```
 
-# IMPORTANT! Motion controller (grblHAL) settings
-- We strongly recommend you to use 32b microcontroller with grblHAL firmware for the new machine builds. https://github.com/grblHAL (Original GRBL firmware is still supported, but it is currently reaching the end-of-life due to limitations of 8b microcontrollers)
-- GRBL should be configured to use **MPos** rather than **Wpos**. This means that `$10=` should be set to odd number. As of GRBL 1.1 we recommend setting `$10=3`. If you have troubles communicating with your machine, you can try to set failsafe value `$10=1`.
-- CADs, bCNC and GRBL all work in millimeters by default. Make sure that `$13=0` is set in GRBL, if you experience strange behavior. (unless you've configured your CAD and bCNC to use inches)
-- Before filing bug please make sure you use latest stable official release of GRBL. Older and unofficial releases might work, but we frequently see cases where they don't. So please upgrade firmware in your Arduinos to reasonably recent version if you can.
-- Also read about all possible GRBL settings and make sure your setup is correct: https://github.com/gnea/grbl/wiki/Grbl-v1.1-Configuration
-- GrblHAL also has "Compatibility level" settings which have to be correctly configured during firmware compilation: https://github.com/grblHAL/core/wiki/Compatibility-level
+---
 
-# Configuration
-You can modify most of the parameters from the "CAM -> Config/Controller" page.
-You can also enable (up to) 6-axis mode in Config section,
-but bCNC restart is required for changes to take place.
-Only the changes/differences from the default configuration
-file will be saved in your home directory ${HOME}/.bCNC  or ~/.bCNC
+## **Complete Command Sequence**
 
-The default configuration is stored on bCNC.ini in the
-installation directory.
+```batch
+REM Step 1: Clone repository
+git clone https://github.com/pablo-pillcaseo/bcnc-pillcase
+cd bcnc-pillcase
 
-*PLEASE DO NOT CHANGE THIS FILE, IT'S GOING TO BE OVERWRITTEN ON EACH UPGRADE OF BCNC*
+REM Step 2: Setup environment
+update_and_setup.bat
 
-# Features:
-- simple and intuitive interface for small screens
-- 3-axis and 6-axis GUI modes
-- import/export **g-code**, **dxf** and **svg** files
-- 3D mesh slicing **stl** and **ply** files
-- fast g-code sender (works nicely on RPi and old hardware)
-- workspace configuration (G54..G59 commands)
-- user configurable buttons
-- g-code **function evaluation** with run time expansion
-- feed override during the running for fine tuning
-- Easy probing:
-  - simple probing
-  - center finder with a probing ring
-  - **auto leveling**, Z-probing and auto leveling by altering the g-code during
-    sending (or permanently autoleveling the g-code file).
-  - height color map display
-  - create g-code by jogging and recording points (can even use camera for this)
-  - **manual tool change** expansion and automatic tool length probing
-  - **canned cycles** expansion
-- Various Tools:
-  - user configurable database of materials, endmills, stock
-  - properties database of materials, stock, end mills etc..
-  - basic **CAM** features (profiling, pocketing, drilling, flat/helical/ramp cutting, thread milling, cutout tabs, drag knife)
-  - User g-code plugins:
-    - bowl generator
-    - finger joint box generator
-    - simple spur gear generator
-    - spirograph generator
-    - surface flatten
-    - play melody from MIDI file using stepper motor frequency
-    - ...
-- G-Code editor and display
-    - graphical display of the g-code, and workspace
-    - graphically moving and editing g-code
-    - reordering code and **rapid motion optimization**
-    - moving, rotating, mirroring the g-code
-- Web pendant to be used via smart phones
+REM Step 3: Run bCNC
+run_bCNC.bat
+```
 
-# Debugging
-You can log serial communication by changing the port to something like:
+---
 
-    spy:///dev/ttyUSB0?file=serial_log.txt&raw
-    spy://COM1?file=serial_log.txt&raw
+## **Troubleshooting**
 
-If a file isn't specified, the log is written to stderr.
-The 'raw' option outputs the data directly, instead of creating a hex dump.
-Further documentation is available at: https://pyserial.readthedocs.io/en/latest/url_handlers.html#spy
+### **If Step 1 Fails (Git Clone):**
+```batch
+# Check if Git is installed
+git --version
 
-# Disclaimer
-  The software is made available "AS IS". It seems quite stable, but it is in
-  an early stage of development.  Hence there should be plenty of bugs not yet
-  spotted. Please use/try it with care, I don't want to be liable if it causes
-  any damage :)
+# If not installed, download from:
+# https://git-scm.com/download/win
+```
 
-# See also
-  - G-code simulators that you can use to independently cross-check g-code generated by bCNC or verify any g-code files in case you have troubles running them.
-    - https://harvie.github.io/cnc-simulator ([github](https://github.com/Harvie/cnc-simulator))
-    - https://camotics.org
-    - https://freecad.org
+### **If Step 2 Fails (Setup):**
+```batch
+# Common issues and solutions:
+
+# 1. Python not found
+# - Script will auto-install Python 3.11
+# - If auto-install fails, manually install from python.org
+
+# 2. Network issues during pip install
+# - Check internet connection
+# - Try running as administrator
+
+# 3. Permission errors
+# - Run Command Prompt as Administrator
+# - Or change to a directory with write permissions
+```
+
+### **If Step 3 Fails (Run):**
+```batch
+# Check if environment is properly activated
+env\Scripts\activate.bat
+python --version
+
+# Should show Python from the env folder
+# If not, re-run setup script
+```
+
+---
+
+## **Updating bCNC (Future Runs)**
+
+### **To get latest updates:**
+**Option 1: Double-click method**
+1. Open the `bcnc-pillcase` folder in Windows Explorer
+2. Double-click `update_and_setup.bat` to update
+
+**Option 2: Command line**
+```batch
+update_and_setup.bat
+```
+
+**What happens during update:**
+- ✅ Fetches latest code from GitHub
+- ✅ Updates to newest version
+- ✅ Reinstalls dependencies if needed
+- ✅ Keeps your environment ready
+
+**Note:** The same `update_and_setup.bat` script works for both initial setup and future updates!
+
+---
+
+## **Manual Commands (If Scripts Don't Work)**
+
+### **Manual Setup:**
+```batch
+REM Create virtual environment
+python -m venv env
+
+REM Activate environment
+env\Scripts\activate.bat
+
+REM Install dependencies
+pip install -r bCNC\requirements.txt
+```
+
+### **Manual Run:**
+```batch
+REM Activate environment
+env\Scripts\activate.bat
+
+REM Run bCNC
+python bCNC\bCNC.py
+```
+
+---
+
+## **Summary**
+
+**The 4-step process is designed to be simple and automated:**
+
+1. **Clone** → Gets the code
+2. **Setup** → Prepares the environment  
+3. **Run** → Launches the application
+4. **Update** → Gets latest version (when needed)
+
+**Each step handles all the complexity automatically, so you just need to run the commands in order!**
