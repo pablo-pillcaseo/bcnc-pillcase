@@ -1,4 +1,5 @@
 import os
+import io
 
 # Redirect Blender's configuration, data, and scripts to your custom paths
 os.environ["BLENDER_USER_CONFIG"] = r""
@@ -62,19 +63,24 @@ def resolve_font_path(font_name):
     return None
 
 
-def setup_blender_scene(engrave_text, text_font, text_width_mm, text_height_mm, text_position_mm, rotation_degrees,
-                        layer_height_mm, safe_height_mm, save_dir, feedrate_mm, spindle_rpm, final_height_mm):
+def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_mm, rotation_degrees,
+                        layer_height_mm, safe_height_mm, save_dir, feedrate_mm, spindle_rpm, final_height_mm, work_area_width, work_area_height, gap_distance_mm=0.2):
     blend_file_path = os.path.join(save_dir, "output.blend")
     # addon_name = "bl_ext.user_default.fabex"
 
     # Suppress warnings
     warnings.filterwarnings("ignore")
 
-    # Suppress print output
+    # Capture print output and errors
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
+    
+    # Create StringIO objects to capture output
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    
+    sys.stdout = stdout_capture
+    sys.stderr = stderr_capture
 
     try:
         # # Enable Addon
@@ -96,39 +102,113 @@ def setup_blender_scene(engrave_text, text_font, text_width_mm, text_height_mm, 
 
         bpy.context.scene.cam_machine.output_tool_change = False  # Disable tool change command
         bpy.context.scene.cam_machine.eval_splitting = False  # Disable splitting g-code for large files
+        bpy.context.scene.cam_machine.working_area[0] = work_area_width/1000
+        bpy.context.scene.cam_machine.working_area[1] = work_area_height/1000
 
         # Remove all objects
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
+        
+        temp_placeholder = "___PIPE_PLACEHOLDER___"
 
-        # Add text object
-        bpy.ops.object.text_add(location=(0, 0, 0))
-        text_obj = bpy.context.object
-        text_obj.data.body = engrave_text
+        # Check if text contains pipe separator for word spacing
+        # First, handle special case where <|> should be treated as literal | character
+        if '<|>' in engrave_text:
+            # Replace <|> with a temporary placeholder, then restore after splitting
+            engrave_text_processed = engrave_text.replace('<|>', temp_placeholder)
+        else:
+            engrave_text_processed = engrave_text
+            
+        if '|' in engrave_text_processed:
+            # Handle pipe-separated text with spacing
+            gap_distance = gap_distance_mm / 1000  # convert mm to meters
+            created_objects = []
+            
+            # Clear selection
+            bpy.ops.object.select_all(action='DESELECT')
+            
+            # Split the text by pipe character
+            parts = engrave_text_processed.split('|')
+            
+            # Restore <|> placeholders back to | characters
+            parts = [part.replace(temp_placeholder, '|') for part in parts]
+            
+            # Loop through each part and create separate text objects
+            x_offset = 0
+            for i, part in enumerate(parts):
+                # Add text object
+                bpy.ops.object.text_add(location=(x_offset, 0, 0))
+                text_obj = bpy.context.object
+                text_obj.data.body = part
+                text_obj.data.size = text_font_size/1000
+                text_obj.name = f"TextPart_{i}"
+                
+                # Apply font if available
+                if font_path:
+                    print(f"font_path for part {i}: {font_path}")
+                    vect_font = bpy.data.fonts.load(font_path)
+                    text_obj.data.font = vect_font
+                    print(f"Font '{font_path}' loaded successfully for part {i}.")
+                else:
+                    print(f"No font selected for part {i}.")
+                
+                # Convert to mesh
+                bpy.ops.object.convert(target='MESH')
+                
+                # Store reference
+                created_objects.append(text_obj)
+                
+                # Update scene to get accurate bounding box
+                bpy.context.view_layer.update()
+                bounds = text_obj.bound_box
+                width = abs(bounds[4][0] - bounds[0][0])  # X-axis width
+                x_offset += width + gap_distance
+            
+            # Join all created mesh objects into one
+            for obj in created_objects:
+                obj.select_set(True)
+            bpy.context.view_layer.objects.active = created_objects[0]
+            bpy.ops.object.join()
+            
+            # Rename final object
+            bpy.context.object.name = "Text"
+            text_obj = bpy.context.object
+            
+            # Get Actual Dimensions After Conversion
+            dimensions = text_obj.dimensions
+            print("Actual Dimensions After Conversion (Combined):", dimensions)
+            
+        else:
+            # Original single text object logic
+            # Add text object
+            bpy.ops.object.text_add(location=(0, 0, 0))
+            bpy.context.object.data.size = text_font_size/1000
+            
+            text_obj = bpy.context.object
+            # Use processed text (with <|> converted to | if needed)
+            # Restore placeholder back to | character if it exists
+            if '<|>' in engrave_text:
+                text_obj.data.body = engrave_text_processed.replace(temp_placeholder, '|')
+            else:
+                text_obj.data.body = engrave_text_processed
 
-        if text_font:
-            font_path = resolve_windows_font_path(text_font)
-            print("font_path", font_path)
             if font_path:
+                print("font_path", font_path)
                 vect_font = bpy.data.fonts.load(font_path)
                 text_obj.data.font = vect_font
-                print(f"Font '{text_font}' loaded successfully.")
+                print(f"Font '{font_path}' loaded successfully.")
             else:
-                print(f"Font '{text_font}' not found.")
-        else:
-            print("No font selected.")
+                print("No font selected.")
 
-        # Convert Text to Mesh to Get Accurate Dimensions
-        bpy.ops.object.convert(target='MESH')
-        bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+            # Convert Text to Mesh to Get Accurate Dimensions
+            bpy.ops.object.convert(target='MESH')
+            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
 
-        # Get Actual Dimensions After Conversion
-        dimensions = text_obj.dimensions
-        print("Actual Dimensions After Conversion:", dimensions)
+            # Get Actual Dimensions After Conversion
+            dimensions = text_obj.dimensions
+            print("Actual Dimensions After Conversion:", dimensions)
 
-        # Scale text object to fit within 50mm x 100mm while keeping aspect ratio
-        scale_factor = min(text_width_mm / (dimensions.x * 1000), text_height_mm / (dimensions.y * 1000))
-        text_obj.scale = (scale_factor, scale_factor, scale_factor)
+
         text_pos_meters = (text_position_mm[0] / 1000, text_position_mm[1] / 1000, text_position_mm[2] / 1000)
         # Move text object to a new location (e.g., (0, 0, 1))
         text_obj.location = text_pos_meters
@@ -148,8 +228,6 @@ def setup_blender_scene(engrave_text, text_font, text_width_mm, text_height_mm, 
         bpy.ops.scene.cam_operation_add()
 
         bpy.ops.wm.save_as_mainfile(filepath=blend_file_path)
-
-        print(f"COMPLETED! Text is properly sized to {text_width_mm}mm x {text_height_mm}mm")
 
         bpy.context.scene.cam_operations[0].cut_type = 'ONLINE'
         bpy.context.scene.cam_operations[0].stepdown = layer_height_mm / 1000  # layer height
@@ -175,12 +253,29 @@ def setup_blender_scene(engrave_text, text_font, text_width_mm, text_height_mm, 
         # print("COMPLETED! GCODE is generated", blend_file_path)
 
     finally:
-        sys.stdout.close()
-        sys.stderr.close()
+        # Get captured output
+        captured_stdout = stdout_capture.getvalue()
+        captured_stderr = stderr_capture.getvalue()
+        
+        # Close the StringIO objects
+        stdout_capture.close()
+        stderr_capture.close()
+        
         # Restore original print output
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         warnings.resetwarnings()
+        
+        # # Print captured output and errors
+        # if captured_stdout:
+        #     print("=== CAPTURED STDOUT ===")
+        #     print(captured_stdout)
+        #     print("=== END STDOUT ===")
+        
+        # if captured_stderr:
+        #     print("=== CAPTURED STDERR ===")
+        #     print(captured_stderr)
+        #     print("=== END STDERR ===")
 
     return gcode_file_path
 

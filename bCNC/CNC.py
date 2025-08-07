@@ -525,9 +525,7 @@ class Probe:
             dz = 0.0
 
         if dx == 0.0 and dy == 0.0:
-            # print("x2: ", x2, "y2: ", y2, "poly_plane_coeffs: ", poly_plane_coeffs.tolist())
-            z2 = self.calculate_z_from_poly(x2, y2, poly_plane_coeffs.tolist(), poly_plane_degree)
-            # print("z2: ", z2)
+            z2 += self.calculate_z_from_poly(x2, y2, poly_plane_coeffs.tolist(), poly_plane_degree)
             return [(x2, y2, z2)]
             # return [(x2, y2, z2+1)]
 
@@ -3793,7 +3791,7 @@ class GCode:
                 terms.append((X ** i) * (Y ** j))
         return np.vstack(terms).T
 
-    def fit_polynomial_surface_numpy(self, points, degree=2):
+    def fit_polynomial_surface_numpy(self, points, degree=1):
         points = np.array(points)
         if points.ndim != 2 or points.shape[1] < 3:
             print("❌ Error: 'multi_probe_points' must be a list of 3D points (X, Y, Z)")
@@ -3808,7 +3806,7 @@ class GCode:
         coeffs, *_ = np.linalg.lstsq(A, Z, rcond=None)  # least squares solution
         return coeffs
 
-    def surf_align_block(self, block, poly_plane_coeffs, poly_plane_degree):
+    def surf_align_block(self, block, poly_plane_coeffs, poly_plane_degree, step_size=1):
         z_probe_offset = self.z_probe_to_tool_offset
         new = []
 
@@ -3849,14 +3847,14 @@ class GCode:
                     for x2, y2, z2 in xyz[1:]:
                         for x, y, z in self.probe.splitLine_surf_align(x1, y1, z1, x2,
                                                                        y2, z2, poly_plane_coeffs, poly_plane_degree,
-                                                                       step_size=1):
+                                                                       step_size=step_size):
                             z -= z_probe_offset
                             new.append(
                                 "".join([
                                     f"G{int(g)}",
-                                    f"{self.fmt('X', x / self.cnc.unit)}",
-                                    f"{self.fmt('Y', y / self.cnc.unit)}",
-                                    f"{self.fmt('Z', z / self.cnc.unit)}",
+                                    f"{self.fmt(' X', x / self.cnc.unit)}",
+                                    f"{self.fmt(' Y', y / self.cnc.unit)}",
+                                    f"{self.fmt(' Z', z / self.cnc.unit)}",
                                     extra,
                                 ])
                             )
@@ -3882,17 +3880,16 @@ class GCode:
 
         return new, bounds
 
-    def surf_align_gcode(self, items):
+    def surf_align_gcode(self, items, step_size=1, degree=1):
         print("Surf Align G-Code")
 
         # self.probe.multi_probe_points = [[-3.861, 18.207, 0], [4.7, -22.876, -1], [-4.7, -3.686, 0],
-        #                                  [4.701, 7.0, -3], [4.701, -11, 2]]  # TODO: Remove this, test probe points
-        
+        #                                  [4.701, 7.0, -3], [4.701, -11, 2],  [5.701, -12, 2.01]]  # TODO: Remove this, test probe points
+
         if self.probe.multi_probe_points is None or len(self.probe.multi_probe_points) < self.probe.no_of_points:
             print("No Multi-Point Probe Points, or not enough points")
             return None
 
-        degree = 1
         poly_plane_coeffs = self.fit_polynomial_surface_numpy(self.probe.multi_probe_points, degree=degree)
         if poly_plane_coeffs is None:
             print("❌ Polynomial fitting failed. Aborting surface align.")
@@ -3912,7 +3909,7 @@ class GCode:
             block = self.blocks[bid]
             if block.name() in ("Header", "Footer"):
                 continue
-            lines, bounds = self.surf_align_block(block, poly_plane_coeffs, poly_plane_degree=degree)
+            lines, bounds = self.surf_align_block(block, poly_plane_coeffs, poly_plane_degree=degree, step_size=step_size)
             undoinfo.append(self.addBlockOperationUndo(bid, operation))
             undoinfo.append(self.setBlockLinesUndo(bid, lines))
 
