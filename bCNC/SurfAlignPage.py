@@ -1273,11 +1273,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.stop_quick_align = False
 
         # Track scheduled callbacks so we can cancel them on stop
-        # === Add these near the top of MultiPointProbe.__init__ after your fields ===
         self._poll_id = None
         self._process_id = None
         self._run_id = None
         self._deploy_delay_id = None
+        self._retract_id = None  # for delayed retract after hard stop
+        self.probe_deployed = False  # Track probe state
 
         # === UI (unchanged layout, trimmed for brevity – keep yours) ===
         lframe = tkExtra.ExLabelFrame(self, text=_("Multi-Point Surface Probe"), foreground="DarkBlue")
@@ -1476,6 +1477,18 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             return tolist()
         return list(pts)
 
+    def _retract_probe(self, label="[RETRACT]"):
+        """Retract physical probe if deployed; safe to call repeatedly."""
+        try:
+            if getattr(self, "probe_deployed", False):
+                self.app.blt_serial_send('2')
+                self.probe_deployed = False
+                print(f"{label} probe retract sent")
+                return True
+        except Exception as e:
+            print(f"{label} probe retract error:", e)
+        return False
+
     def generate_probe(self, show_plot=True):
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
@@ -1530,6 +1543,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                 return
             try:
                 self.app.blt_serial_send('1')  # deploy probe
+                self.probe_deployed = True
             except Exception as e:
                 print("Deploy probe error:", e)
 
@@ -1547,7 +1561,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
             return True
 
-        self._deploy_delay_id = self.app.after(500, _deploy_and_run)  # replaces time.sleep(.5)
+        self._deploy_delay_id = self.app.after(500, _deploy_and_run)
         return True
 
     def quick_align_run(self):
@@ -1592,6 +1606,10 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         except Exception:
             pass
         print("PROBING COMPLETED")
+
+        # Retract on normal completion
+        self._retract_probe("[COMPLETE]")
+
         self._process_id = self.app.after(5000, self._process_alignment_results)
 
     def _process_alignment_results(self):
@@ -1685,7 +1703,10 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         except Exception as e:
             print("[STOP] M5/M9 error:", e)
 
-        # 6) Cancel any scheduled Tk callbacks so nothing restarts
+        # 5.1) Retract probe now (gentle path)
+        self._retract_probe("[STOP]")
+
+        # 6) Cancel callbacks
         self._cancel_after_callbacks()
 
         # 7) If we never got to a stable state and fallback allowed -> soft reset
@@ -1697,12 +1718,18 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                     print("[STOP] <<Stop>> (soft reset) sent")
                 except Exception as e:
                     print("[STOP] Could not send <<Stop>>:", e)
+                # Controllers can ignore immediate commands after reset—retry retract shortly
+                try:
+                    if self._retract_id:
+                        self.app.after_cancel(self._retract_id)
+                    self._retract_id = self.app.after(300, lambda: self._retract_probe("[STOP-FB]"))
+                except Exception:
+                    pass
 
         print("[STOP] Completed stop pipeline (sticky stop latched)")
 
     def _cancel_after_callbacks(self):
-        """Cancel any scheduled Tk 'after' callbacks to prevent resume."""
-        for attr in ("_poll_id", "_process_id", "_run_id", "_deploy_delay_id"):
+        for attr in ("_poll_id", "_process_id", "_run_id", "_deploy_delay_id", "_retract_id"):
             aid = getattr(self, attr, None)
             if aid:
                 try:
