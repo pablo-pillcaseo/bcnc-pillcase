@@ -1264,251 +1264,126 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         # Focus on the window
         help_window.focus_set()
 
+
 class MultiPointProbe(CNCRibbon.PageFrame):
     def __init__(self, master, app):
-        """Initialize the MultiPointProbe class for polynomial surface probing."""
         CNCRibbon.PageFrame.__init__(self, master, "MultiPointProbe", app)
-        
-        
-        self.probe_points = []  # Dummy list of (X, Y) coordinates
+
+        self.probe_points = []
         self.stop_quick_align = False
-        
-        # UI Elements
+
+        # Track scheduled callbacks so we can cancel them on stop
+        # === Add these near the top of MultiPointProbe.__init__ after your fields ===
+        self._poll_id = None
+        self._process_id = None
+        self._run_id = None
+        self._deploy_delay_id = None
+
+        # === UI (unchanged layout, trimmed for brevity – keep yours) ===
         lframe = tkExtra.ExLabelFrame(self, text=_("Multi-Point Surface Probe"), foreground="DarkBlue")
         lframe.pack(side=TOP, fill=X)
         frame = lframe.frame
-        
-        
-        
-        # --- Input Fields ---
+
         row, col = 0, 0
         Label(frame, text=_("No. of Points:")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.n_probe_points = tkExtra.IntegerEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.n_probe_points = tkExtra.IntegerEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.n_probe_points.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.n_probe_points, _("Number of probe points"))
-        
-        row += 1
+        tkExtra.Balloon.set(self.n_probe_points, _("Number of probe points"))
+
+        row += 1;
         col = 0
         Label(frame, text=_("Z Min, Max:")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.mp_z_min = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.mp_z_min = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.mp_z_min.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.mp_z_min, _("Z minimum depth to scan"))
-        
         col += 1
-        self.mp_z_max = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.mp_z_max = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.mp_z_max.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.mp_z_max, _("Z safe to move"))
 
-
-        
-        # feed command
-        row += 1
+        row += 1;
         col = 0
-        Label(frame,
-              text=_("Probe Coverage Method")).grid(row=row, column=col, sticky=E)
+        Label(frame, text=_("Probe Coverage Method")).grid(row=row, column=col, sticky=E)
         col += 1
         self.probe_coverage_methods = ["EvenCoverage", "AreaCoverage"]
-        self.probe_coverage_method = tkExtra.Combobox(
-            frame,
-            True,
-            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
-            width=16,
-        )
+        self.probe_coverage_method = tkExtra.Combobox(frame, True, background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+                                                      width=16)
         self.probe_coverage_method.grid(row=row, column=col, sticky=EW)
         self.probe_coverage_method.fill(self.probe_coverage_methods)
         self.probe_coverage_method.set("EvenCoverage")
         self.addWidget(self.probe_coverage_method)
-        
-        
-        
-        # --- ALL Axis Offset (Probe → Tool) ---
-        row+=1
+
+        row += 1;
         col = 0
         Label(frame, text=_("Offset (Probe → Tool):")).grid(row=row, column=col, sticky=E)
-        row+=1
+        row += 1;
         col = 0
-        self.x_probe_to_tool_offset = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
-        self.x_probe_to_tool_offset.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.x_probe_to_tool_offset, _("X offset (mm) between probe and tool.")
-        )
-        self.addWidget(self.x_probe_to_tool_offset)
-        col += 1
-        self.y_probe_to_tool_offset = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
-        self.y_probe_to_tool_offset.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.y_probe_to_tool_offset, _("Y offset (mm) between probe and tool.")
-        )   
-        self.addWidget(self.y_probe_to_tool_offset)
-        col += 1
-        self.z_probe_to_tool_offset = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
-        self.z_probe_to_tool_offset.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.z_probe_to_tool_offset, _("Z offset (mm) between probe and tool.")
-        )
-        self.addWidget(self.z_probe_to_tool_offset)
-        
-        row += 1
+        self.x_probe_to_tool_offset = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND);
+        self.x_probe_to_tool_offset.grid(row=row, column=0, sticky=EW)
+        self.y_probe_to_tool_offset = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND);
+        self.y_probe_to_tool_offset.grid(row=row, column=1, sticky=EW)
+        self.z_probe_to_tool_offset = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND);
+        self.z_probe_to_tool_offset.grid(row=row, column=2, sticky=EW)
+
+        row += 1;
         col = 0
         Label(frame, text=_("Step Size:")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.step_size = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.step_size = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.step_size.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.step_size, _("Distance between G-code points when creating surface-aligned toolpaths. Smaller values create smoother curves but more G-code commands. Use larger values when polynomial degree is 1 (flat plane).")
-        )
-        self.addWidget(self.step_size)
-        
-        row += 1
+
+        row += 1;
         col = 0
         Label(frame, text=_("Poly Degree:")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.polynomial_degree = tkExtra.IntegerEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.polynomial_degree = tkExtra.IntegerEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.polynomial_degree.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.polynomial_degree, _("Degree of the polynomial surface to fit the probe points ( 1 = Flat plane).")
-        )
-        self.addWidget(self.polynomial_degree)
-        
-        
-        # Add validation status label
-        row += 1
+
+        row += 1;
         col = 0
         self.validation_status = Label(frame, text="", fg="gray", font=("TkDefaultFont", 8))
         self.validation_status.grid(row=row, column=col, columnspan=3, sticky=W)
         self.addWidget(self.validation_status)
-        
-        # Bind validation updates
+
         self.n_probe_points.bind('<KeyRelease>', self.update_validation_status)
         self.polynomial_degree.bind('<KeyRelease>', self.update_validation_status)
-        
-        # --- Generate Probe & Show Probe Points & Start Probing ---
 
-        row += 1
+        row += 1;
         col = 0
-        probe_generate_b = Button(frame, text=_("Generate Probe"), command=self.generate_probe)
-        probe_generate_b.grid(row=row, column=col, sticky=W)
-        self.addWidget(probe_generate_b)
-
-        col = 1
-        # --- Button to Show Probe Points ---
-        show_button = Button(frame, text=_("Show Probe Points"), command=self.show_probe_points)
-        show_button.grid(row=row, column=col, sticky=W)
-        self.addWidget(show_button)
-
-
-
-        
-        
+        Button(frame, text=_("Generate Probe"), command=self.generate_probe).grid(row=row, column=col, sticky=W)
         col += 1
-        probe_generate_b = Button(frame, text=_("Start Probing"), command=self.start_probing)
-        probe_generate_b.grid(row=row, column=col, sticky=W)
-        self.addWidget(probe_generate_b)
-        
-        
+        Button(frame, text=_("Show Probe Points"), command=self.show_probe_points).grid(row=row, column=col, sticky=W)
+        col += 1
+        Button(frame, text=_("Start Probing"), command=self.start_probing).grid(row=row, column=col, sticky=W)
 
-        
-        
-        
-        row += 1
+        row += 1;
         col = 0
-        select_all_button = Button(
-            frame,
-            text=_("Select All"),
-            command=lambda: self.app.event_generate("<<SelectAll>>")
-        )
-        select_all_button.grid(row=row, column=col, sticky=W)
-        self.addWidget(select_all_button)
+        Button(frame, text=_("Select All"), command=lambda: self.app.event_generate("<<SelectAll>>")).grid(row=row,
+                                                                                                           column=col,
+                                                                                                           sticky=W)
         col += 1
-        surf_align_gcode_b = Button(frame, text=_("Surface Align G-Code"), command=self.surface_align_gcode)
-        surf_align_gcode_b.grid(row=row, column=col, sticky=W)
-        self.addWidget(surf_align_gcode_b)
-        
-        
-                # Add new Z safety limit field
-        row += 1
+        Button(frame, text=_("Surface Align G-Code"), command=self.surface_align_gcode).grid(row=row, column=col,
+                                                                                             sticky=W)
+
+        row += 1;
         col = 0
         Label(frame, text=_("Z Min Safety Limit:")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.z_safety_limit = tkExtra.FloatEntry(
-            frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
+        self.z_safety_limit = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.z_safety_limit.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.z_safety_limit, _("Program will prevent execution if any G-code command Z coordinate goes below this point"))
-        self.addWidget(self.z_safety_limit)
-        
-        # Add Quick Align & Run button with green color
-        row += 1
-        col = 0
-        quick_align_run_b = Button(
-            frame, 
-            text=_("Quick Align & Run"), 
-            command=self.quick_align_run,
-            bg="#4CAF50",  # Material Design Green
-            fg="white",    # White text
-            activebackground="#45a049",  # Slightly darker green when pressed
-            activeforeground="white"
-        )
-        quick_align_run_b.grid(row=row, column=col, sticky=W)
-        self.addWidget(quick_align_run_b)
-        
-        # Add detailed tooltip
-        tkExtra.Balloon.set(
-            quick_align_run_b, 
-            _("Quick Align & Run\n\n"
-              "Performs a complete surface alignment process:\n"
-              "1. Generate probe points\n"
-              "2. Start probing\n"
-              "3. Select all points\n"
-              "4. Surface align G-code\n"
-              "5. Run the G-code\n\n"
-              "Use this button to quickly align and run in one step.")
-        )
-        
-                
-        col += 1
-        quick_align_stop_b = Button(
-            frame,
-            text=_("Stop Running"), 
-            command=self.quick_align_stop,
-            bg="#F44336",  # Material Design Red
-            fg="white",    # White text
-            activebackground="#d32f2f",  # Darker red when pressed
-            activeforeground="white"
-        )
-        quick_align_stop_b.grid(row=row, column=col, sticky=W)
-        
-        
-        
 
-        
-        
-        
+        row += 1;
+        col = 0
+        Button(frame, text=_("Quick Align & Run"), command=self.quick_align_run, bg="#4CAF50", fg="white",
+               activebackground="#45a049", activeforeground="white").grid(row=row, column=col, sticky=W)
+        col += 1
+        Button(frame, text=_("Stop Running"), command=self.quick_align_stop, bg="#F44336", fg="white",
+               activebackground="#d32f2f", activeforeground="white").grid(row=row, column=col, sticky=W)
+
         frame.grid_columnconfigure(1, weight=1)
         self.loadConfig()
-        
+
+    # ------------------ Config (unchanged) ------------------
     def loadConfig(self):
         self.mp_z_min.set(Utils.getFloat("SurfAlign", "mp_z_min"))
         self.mp_z_max.set(Utils.getFloat("SurfAlign", "mp_z_max"))
@@ -1519,10 +1394,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.z_safety_limit.set(Utils.getFloat("SurfAlign", "z_safety_limit"))
         self.step_size.set(Utils.getFloat("SurfAlign", "step_size"))
         self.polynomial_degree.set(Utils.getInt("SurfAlign", "polynomial_degree"))
-        
-        # Update validation status after loading config
         self.update_validation_status()
-        
+
     def saveConfig(self):
         Utils.setFloat("SurfAlign", "mp_z_min", self.mp_z_min.get())
         Utils.setFloat("SurfAlign", "mp_z_max", self.mp_z_max.get())
@@ -1533,226 +1406,210 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Utils.setFloat("SurfAlign", "z_safety_limit", self.z_safety_limit.get())
         Utils.setFloat("SurfAlign", "step_size", self.step_size.get())
         Utils.setInt("SurfAlign", "polynomial_degree", self.polynomial_degree.get())
-        
+
+    # ------------------ Your existing logic, with minor tweaks ------------------
     def surface_align_gcode(self):
-        if  self.x_probe_to_tool_offset.get() != "":
-            self.app.gcode.x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.x_probe_to_tool_offset = 0
-        if self.y_probe_to_tool_offset.get() != "":
-            self.app.gcode.y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.y_probe_to_tool_offset = 0
-        if self.z_probe_to_tool_offset.get() != "":
-            self.app.gcode.z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.z_probe_to_tool_offset = 0 
-        # self.app.insertCommand("SURF_ALIGN", True)
-        
+        self.app.gcode.x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get() or 0)
+        self.app.gcode.y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get() or 0)
+        self.app.gcode.z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get() or 0)
+
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        
-        # Enhanced validation
-        is_valid, message, recommended_points = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
-        
+        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
-        
-        bounds = self.app.gcode.surf_align_gcode(self.app.editor.getSelectedBlocks(), step_size=float(self.step_size.get()), degree=polynomial_degree)
+
+        bounds = self.app.gcode.surf_align_gcode(self.app.editor.getSelectedBlocks(),
+                                                 step_size=float(self.step_size.get()),
+                                                 degree=polynomial_degree)
         self.app.drawAfter()
-    
+
     def validate_probe_points_vs_degree(self, num_points, degree):
-        """
-        Validate if the number of probe points is sufficient for the polynomial degree.
-        
-        Args:
-            num_points (int): Number of probe points
-            degree (int): Polynomial degree
-            
-        Returns:
-            tuple: (is_valid, message, recommended_points)
-        """
-        # Calculate minimum points needed (number of coefficients)
         min_points = (degree + 1) * (degree + 2) // 2
-        ratio = num_points / min_points
-        
-        # Basic validation: need at least as many points as coefficients
+        ratio = num_points / max(min_points, 1)
         if num_points < min_points:
-            message = f"❌ Insufficient probe points for polynomial degree {degree}.\n" \
-                     f"   Need at least {min_points} points, but only {num_points} provided.\n" \
-                     f"   Recommended: {int(min_points * 1.2)} points for reliable fitting."
-            return False, message, int(min_points * 1.2)
-        
-        # Check for good ratio (at least 1.2)
+            msg = (f"❌ Insufficient probe points for degree {degree}.\n"
+                   f"   Need ≥ {min_points}, got {num_points}.\n"
+                   f"   Recommended: {int(min_points * 1.2)}+ for robustness.")
+            return False, msg, int(min_points * 1.2)
         if ratio >= 1.2:
-            message = f"✅ Good: {num_points} points for polynomial degree {degree} ({min_points} coefficients).\n" 
-            return True, message, None
-        
-        # Warning: ratio below 1.2
+            return True, f"✅ Good: {num_points} points for degree {degree}.", None
         else:
-            message = f"⚠️  Warning: Low probe points for polynomial degree {degree}.\n"   
-            return True, message, int(min_points * 1.2)
+            return True, f"⚠️ Low points for degree {degree}.", int(min_points * 1.2)
 
     def update_validation_status(self, event=None):
-        """Update the validation status display in real-time."""
         try:
             num_points = int(self.n_probe_points.get())
             degree = int(self.polynomial_degree.get())
-            
-            is_valid, message, recommended_points = self.validate_probe_points_vs_degree(num_points, degree)
-            
-            # Extract the status part of the message
+            is_valid, message, _ = self.validate_probe_points_vs_degree(num_points, degree)
             if "❌" in message:
                 self.validation_status.config(text=message.split('\n')[0], fg="red")
             elif "⚠️" in message:
                 self.validation_status.config(text=message.split('\n')[0], fg="orange")
-            elif "✅" in message:
-                self.validation_status.config(text=message.split('\n')[0], fg="green")
             else:
-                self.validation_status.config(text="", fg="gray")
-                
-        except (ValueError, TypeError):
+                self.validation_status.config(text=message.split('\n')[0], fg="green")
+        except Exception:
             self.validation_status.config(text="", fg="gray")
 
+    def _has_points(self):
+        """True if probe_points is non-empty (list or numpy array)."""
+        pts = getattr(self, "probe_points", None)
+        if pts is None:
+            return False
+        # numpy arrays have .size; lists/tuples have len()
+        size = getattr(pts, "size", None)
+        if size is not None:
+            return size > 0
+        try:
+            return len(pts) > 0
+        except Exception:
+            return False
+
+    def _iter_points(self):
+        """Iterate points safely (handles numpy arrays or lists)."""
+        pts = getattr(self, "probe_points", None)
+        if pts is None:
+            return []
+        tolist = getattr(pts, "tolist", None)
+        if callable(tolist):
+            return tolist()
+        return list(pts)
+
     def generate_probe(self, show_plot=True):
-        
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        
-        # Enhanced validation
-        is_valid, message, recommended_points = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
-        
+        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
-        
+        self.probe_points = self.app.gcode.generate_and_plot_probing_points(
+            method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot)
 
-        self.probe_points = self.app.gcode.generate_and_plot_probing_points(method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot)
-        if self.probe_points is None:
-            return False
-        return True
-    
+        print("self.probe_points", self.probe_points)
+        return self._has_points()  # <-- instead of bool(self.probe_points)
+
     def show_probe_points(self):
-        """Display a popup window with the probe points."""
-        if len(self.probe_points) == 0:
+        if not self._has_points():  # <-- avoid "if not self.probe_points"
             messagebox.showwarning(_("Probe error"), _("No probe points found"))
             return
         popup = tkExtra.ExLabelFrame(self, text=_("Probe Points"), foreground="DarkBlue")
         popup.pack(side=TOP, fill=X)
-
-        # Create a label for each probe point
-        for point in self.probe_points:
-            Label(popup.frame, text=f"Point: {point}").pack(anchor=W)
-
-        # Add a close button
-        close_button = Button(popup.frame, text=_("Close"), command=popup.destroy)
-        close_button.pack(side=BOTTOM)
+        for point in self._iter_points():
+            try:
+                txt = f"Point: {tuple(point)}"
+            except Exception:
+                txt = f"Point: {point}"
+            Label(popup.frame, text=txt).pack(anchor=W)
+        Button(popup.frame, text=_("Close"), command=popup.destroy).pack(side=BOTTOM)
 
     def start_probing(self):
-        if self.probe_points is None or len(self.probe_points) == 0:
+        if not self._has_points():  # <-- avoid "if not self.probe_points"
             messagebox.showwarning(_("Probe error"), _("No probe points found"))
             return False
-        
-        if self.x_probe_to_tool_offset.get() != "":
-            x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get())
-        else:
-            x_probe_to_tool_offset = 0
-        if self.y_probe_to_tool_offset.get() != "":
-            y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get())
-        else:
-            y_probe_to_tool_offset = 0
-        if self.z_probe_to_tool_offset.get() != "":
-            z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get())
-        else:
-            z_probe_to_tool_offset = 0
-            
+
+        x_off = float(self.x_probe_to_tool_offset.get() or 0)
+        y_off = float(self.y_probe_to_tool_offset.get() or 0)
+        z_off = float(self.z_probe_to_tool_offset.get() or 0)
+
         print("Start Probing")
         mp_z_min = float(self.mp_z_min.get())
         mp_z_max = float(self.mp_z_max.get())
-        
-        # --- Deploy Probe ---
-        safe_z = mp_z_max + z_probe_to_tool_offset
-        # self.app.run([f"G0Z{safe_z:.4f}"])     # Move Z-up before Deploy Probe
-        self.app.mcontrol.jog(f"Z{safe_z:.4f}")
-        time.sleep(.5)
-        self.app.blt_serial_send('1')          # Deploy Probe
 
-        # --- Probing ---
-        lines = self.app.gcode.probe.multi_point_scan(self.probe_points, mp_z_min, mp_z_max, x_probe_to_tool_offset, y_probe_to_tool_offset, z_probe_to_tool_offset)
-        self.app.run(lines)
-        print("PROBE COMMAND:")
-        print("\n".join(lines))
+        # Move Z-up and deploy probe without blocking UI
+        try:
+            safe_z = mp_z_max + z_off
+            if hasattr(self.app, "mcontrol") and hasattr(self.app.mcontrol, "jog"):
+                self.app.mcontrol.jog(f"Z{safe_z:.4f}")
+        except Exception as e:
+            print("Jog Z before deploy error:", e)
+
+        # Delay deploy and then run probing, Tk-friendly
+        def _deploy_and_run():
+            if self.check_quick_align_stop():  # honor stop before deploying
+                return
+            try:
+                self.app.blt_serial_send('1')  # deploy probe
+            except Exception as e:
+                print("Deploy probe error:", e)
+
+            # Build probing program and run
+            try:
+                lines = self.app.gcode.probe.multi_point_scan(
+                    self.probe_points, mp_z_min, mp_z_max, x_off, y_off, z_off)
+                # Early stop check
+                if self.check_quick_align_stop():
+                    return
+                self.app.run(lines)  # sender should react to feedhold/stop
+                print("PROBE COMMAND:\n", "\n".join(lines))
+            except Exception as e:
+                print("Probing run error:", e)
+
+            return True
+
+        self._deploy_delay_id = self.app.after(500, _deploy_and_run)  # replaces time.sleep(.5)
         return True
 
     def quick_align_run(self):
-        
+        # Start fresh: clear any previous stop & cancel previous timers
+        self._cancel_after_callbacks()
+        self.stop_quick_align = False
+
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        
-        # Enhanced validation
-        is_valid, message, recommended_points = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
-        
+        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
-        
-        self.stop_quick_align = False
-        self._quick_align_thread()
 
-
-    def _quick_align_thread(self):
-        # Implementation of quick alignment in a separate thread
+        # Step 1: generate points (no plot)
         success = self.generate_probe(show_plot=False)
         print("PROBE POINTS GENERATED", success)
-        if success == False:
+        if not success or self.check_quick_align_stop():
             return
-        self.app.gcode.probe.start_multi_point_scan=True
+
+        # Step 2: start probing
+        try:
+            self.app.gcode.probe.start_multi_point_scan = True
+        except Exception:
+            pass
+
         success = self.start_probing()
         print("PROBING STARTED", success)
-        if success == False:
+        if not success or self.check_quick_align_stop():
             return
-        if self.check_quick_align_stop():
-            print("STOPPED QUICK ALIGN WHEN PROBING 0")
-            return
-        
-        # Start polling from main UI thread to check if probing is complete
-        self.app.after(1000, self._poll_probe_status)
-        
+
+        # Step 3: poll probing status
+        self._poll_id = self.app.after(1000, self._poll_probe_status)
+
     def _poll_probe_status(self):
         if self.check_quick_align_stop():
-            print("STOPPED QUICK ALIGN WHEN PROBING 1")
             return
-        if self.app.gcode.probe.start_multi_point_scan:
-            self.app.after(300, self._poll_probe_status)  # Check again in 100ms
-        else:
-            print("PROBING COMPLETED")
-            self.app.after(5000, self._process_alignment_results)
+        try:
+            if self.app.gcode.probe.start_multi_point_scan:
+                self._poll_id = self.app.after(300, self._poll_probe_status)
+                return
+        except Exception:
+            pass
+        print("PROBING COMPLETED")
+        self._process_id = self.app.after(5000, self._process_alignment_results)
 
     def _process_alignment_results(self):
-        
         if self.check_quick_align_stop():
-            print("STOPPED QUICK ALIGN WHEN PROCESSING ALIGNMENT RESULTS")
             return
 
-        if  self.x_probe_to_tool_offset.get() != "":
-            self.app.gcode.x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.x_probe_to_tool_offset = 0
-        if self.y_probe_to_tool_offset.get() != "":
-            self.app.gcode.y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.y_probe_to_tool_offset = 0
-        if self.z_probe_to_tool_offset.get() != "":
-            self.app.gcode.z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get())
-        else:
-            self.app.gcode.z_probe_to_tool_offset = 0
+        self.app.gcode.x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get() or 0)
+        self.app.gcode.y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get() or 0)
+        self.app.gcode.z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get() or 0)
 
         polynomial_degree = int(self.polynomial_degree.get())
-        bounds = self.app.gcode.surf_align_gcode(self.app.editor.getAllBlocks(), step_size=float(self.step_size.get()), degree=polynomial_degree)
+        bounds = self.app.gcode.surf_align_gcode(self.app.editor.getAllBlocks(),
+                                                 step_size=float(self.step_size.get()),
+                                                 degree=polynomial_degree)
         self.app.drawAfter()
-        print("Bounds: ", bounds)
+        print("Bounds:", bounds)
         print("SURF ALIGN GCODE COMPLETED")
+
         if bounds is None:
             messagebox.showwarning(_("Probing Error 0"), _("No probe points found 0"))
             return
@@ -1762,33 +1619,137 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             return
 
         if z_min < float(self.z_safety_limit.get()):
-            # self.app.undo()
             self.app.event_generate("<<Undo>>")
-            messagebox.showwarning(_("Safety Limit Error"), _("Z-min is below the safety limit. Please adjust the Z-min safety limit."))
+            messagebox.showwarning(_("Safety Limit Error"),
+                                   _("Z-min is below the safety limit. Please adjust the Z-min safety limit."))
             return
-        self.app.after(1000, self._gcode_run_command)
 
-        
+        self._run_id = self.app.after(1000, self._gcode_run_command)
+
     def _gcode_run_command(self):
-        
         if self.check_quick_align_stop():
-            print("STOPPED QUICK ALIGN PRVENTED RUNNING GCODE")
+            print("STOPPED QUICK ALIGN prevented RUN")
             return
-        
-        self.app.run()
-        print("GCODE RUN COMMAND SEND")
-        
-        
-    def check_quick_align_stop(self):
-        if self.stop_quick_align:
+        try:
+            self.app.run()
+            print("GCODE RUN COMMAND SENT")
+        except Exception as e:
+            print("Run error:", e)
+
+    def quick_align_stop(self):
+        """Handler for the red 'Stop Running' button."""
+        # Sticky stop; don't clear it here
+        self.safe_stop_all(use_hard_stop_fallback=True, timeout_ms=1500)
+
+    def safe_stop_all(self, use_hard_stop_fallback=True, timeout_ms=1500):
+        """
+        Gentle stop first:
+          1) Latch stop flag, stop your pipeline
+          2) <<Pause>> (FEED_HOLD) so planner decelerates
+          3) Stop streaming queued lines (if API available)
+          4) Wait briefly for Hold/Idle
+          5) Try to stop spindle/coolant (best effort)
+          6) Cancel any scheduled callbacks
+        If not Hold/Idle in time and fallback is allowed -> <<Stop>> (soft reset).
+        """
+        # 1) Latch stop and mark probing not running
+        self.stop_quick_align = True
+        try:
             self.app.gcode.probe.start_multi_point_scan = False
-            self.stop_quick_align = False
-            print("STOPPED QUICK ALIGN WHEN RUNNING")
+        except Exception:
+            pass
+
+        # 2) Ask bCNC to FEED_HOLD using your default mapping
+        try:
+            self.app.event_generate("<<Pause>>")  # FEED_HOLD (!)
+            print("[STOP] <<Pause>> (feed hold) sent")
+        except Exception as e:
+            print("[STOP] Could not send <<Pause>>:", e)
+
+        # 3) Stop streaming queued gcode (if your app exposes it)
+        try:
+            if hasattr(self.app, "stop"):
+                self.app.stop()  # many bCNC forks expose this
+                print("[STOP] sender.stop() called")
+        except Exception as e:
+            print("[STOP] sender.stop() error:", e)
+
+        # 4) Wait briefly for Hold/Idle; if it never arrives, we may hard-stop
+        if not self._wait_for_hold_or_idle(timeout_ms=timeout_ms, poll_ms=50):
+            print("[STOP] Not in Hold/Idle within timeout")
+
+        # 5) Best-effort: stop spindle & coolant (safe even if already stopped)
+        try:
+            self.app.run(["M5", "M9"])  # won’t succeed on every controller while held; harmless if ignored
+            print("[STOP] M5/M9 sent")
+        except Exception as e:
+            print("[STOP] M5/M9 error:", e)
+
+        # 6) Cancel any scheduled Tk callbacks so nothing restarts
+        self._cancel_after_callbacks()
+
+        # 7) If we never got to a stable state and fallback allowed -> soft reset
+        if use_hard_stop_fallback:
+            st = getattr(getattr(self.app, "status", None), "state", None)
+            if st not in ("Idle", "Hold"):
+                try:
+                    self.app.event_generate("<<Stop>>")  # your default: soft reset / flush
+                    print("[STOP] <<Stop>> (soft reset) sent")
+                except Exception as e:
+                    print("[STOP] Could not send <<Stop>>:", e)
+
+        print("[STOP] Completed stop pipeline (sticky stop latched)")
+
+    def _cancel_after_callbacks(self):
+        """Cancel any scheduled Tk 'after' callbacks to prevent resume."""
+        for attr in ("_poll_id", "_process_id", "_run_id", "_deploy_delay_id"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.app.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _wait_for_hold_or_idle(self, timeout_ms=1500, poll_ms=50):
+        """Poll app.status.state until 'Hold' or 'Idle' or timeout. Returns bool."""
+        waited = 0
+        while waited < timeout_ms:
+            try:
+                st = getattr(getattr(self.app, "status", None), "state", None)
+                if st in ("Hold", "Idle"):
+                    return True
+            except Exception:
+                pass
+            # Keep UI responsive; micro-yield to Tk
+            self._deploy_delay_id = self.app.after(poll_ms, lambda: None)
+            try:
+                self.app.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.app.after_cancel(self._deploy_delay_id)
+            except Exception:
+                pass
+            self._deploy_delay_id = None
+            waited += poll_ms
+        return False
+
+    def check_quick_align_stop(self):
+        """
+        Respect sticky stop. IMPORTANT: do NOT clear the flag here.
+        Also force probing loop to end.
+        """
+        if self.stop_quick_align:
+            try:
+                self.app.gcode.probe.start_multi_point_scan = False
+            except Exception:
+                pass
+            print("[STOP] Sticky stop is set")
             return True
         return False
-        
-    def quick_align_stop(self):
-        self.stop_quick_align = True
+
+
 # =============================================================================
 # Probe Page
 # =============================================================================
