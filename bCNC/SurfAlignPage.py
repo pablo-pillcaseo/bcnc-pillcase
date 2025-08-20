@@ -453,6 +453,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             textvariable=self.engraveText,
         )
         GenGcodeFrame.engraveText.grid(row=row, column=col, sticky=EW)
+        # Bind Enter key to generate GCode
+        GenGcodeFrame.engraveText.bind('<Return>', lambda event: self.generateGcode())
         tkExtra.Balloon.set(
             GenGcodeFrame.engraveText,
             _("Text to engrave. Use | to separate words with spacing. Use <|> for literal pipe character."),
