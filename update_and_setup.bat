@@ -4,7 +4,7 @@ setlocal
 set PYTHON_VERSION=3.11
 set VENV_NAME=env
 set REQUIREMENTS_PATH=bCNC\requirements.txt
-set GIT_REPO_URL=https://github.com/shefeequebk/bCNC
+set GIT_REPO_URL=https://github.com/pablo-pillcaseo/bcnc-pillcase
 
 echo ===============================
 echo Checking for Git and updating code...
