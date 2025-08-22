@@ -1,4 +1,5 @@
 import os
+
 import io
 
 # Redirect Blender's configuration, data, and scripts to your custom paths
