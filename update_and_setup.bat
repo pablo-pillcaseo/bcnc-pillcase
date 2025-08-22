@@ -68,7 +68,7 @@ if errorlevel 1 (
     
     REM Pull latest changes
 echo Pulling latest changes...
-git pull origin master
+git pull origin main
 if errorlevel 1 (
     echo ⚠️ Warning: Failed to pull latest changes. Using current local code.
 ) else (
