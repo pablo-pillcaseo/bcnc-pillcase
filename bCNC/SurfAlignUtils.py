@@ -14,6 +14,7 @@ import math
 import winreg
 import bmesh
 import fabex
+import mathutils
 
 # Register the addon
 if hasattr(fabex, "register"):
@@ -78,20 +79,25 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
     sys.stderr = stderr_capture
 
     def _recenter_geometry_and_origin(obj):
-        """Recenters the object at the origin: X-axis at bounding box center, Y-axis at center of mass."""
-        # Get bounding box for X centering
-        bb = obj.bound_box
-        min_x = min(v[0] for v in bb)
-        max_x = max(v[0] for v in bb)
-        cx = 0.5 * (min_x + max_x)
+        """Set origin to COM for Y/Z, but adjust origin X to bounding-box center without moving geometry."""
+        bpy.context.view_layer.update()
 
-        # Center of mass for Y centering
+        # --- 1) Set origin to center of mass first (affects Y and Z)
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.origin_set(type='ORIGIN_CENTER_OF_MASS', center='BOUNDS')
+        bpy.context.view_layer.update()
 
-        # Now move the object to the calculated X and Y positions
-        obj.location.x -= cx  # Set the X location to center it in the bounding box
+        # --- 2) Get bounding-box X center in local coordinates
+        bb = obj.bound_box
+        cx = (min(v[0] for v in bb) + max(v[0] for v in bb)) / 2
+
+        # --- 3) Shift origin along X only (local space)
+        # Build a translation matrix for origin offset
+        offset = mathutils.Vector((-cx, 0.0, 0.0))
+        obj.data.transform(mathutils.Matrix.Translation(offset))
+
+        # --- 4) Update viewport
         bpy.context.view_layer.update()
 
     try:
