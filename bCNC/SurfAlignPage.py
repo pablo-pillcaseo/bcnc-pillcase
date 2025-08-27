@@ -431,6 +431,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     def __init__(self, master, app):
         CNCRibbon.PageFrame.__init__(self, master, "GenGcode", app)
 
+        self.app.surfalign_gen_gcode_frame = self
+
         lframe = tkExtra.ExLabelFrame(
             self, text=_("GCode"), foreground="DarkBlue")
         lframe.pack(side=TOP, fill=X)
@@ -763,6 +765,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         print("Generate Gcode")
         engrave_text = self.engraveText.get()
         work_area_width, work_area_height = 500, 500
+        font_path = None
         if self.font_var.get() == "":
             text_font = None
         else:
@@ -1377,11 +1380,43 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         row += 1;
         col = 0
-        Button(frame, text=_("Quick Align & Run"), command=self.quick_align_run, bg="#4CAF50", fg="white",
-               activebackground="#45a049", activeforeground="white").grid(row=row, column=col, sticky=W)
+        quick_align_run_b = Button(
+            frame,
+            text=_("Quick Align & Run"),
+            command=self.quick_align_run,
+            bg="#4CAF50", fg="white",
+            activebackground="#45a049", activeforeground="white"
+        )
+        quick_align_run_b.grid(row=row, column=col, sticky=W)
+        tkExtra.Balloon.set(
+            quick_align_run_b,
+            _("Quick Align & Run\n\n"
+              "Performs a complete surface alignment process:\n"
+              "1. Generate G-code\n"
+              "2. Generate probe points\n"
+              "3. Start probing\n"
+              "4. Select all points\n"
+              "5. Surface align G-code\n"
+              "6. Run the G-code\n\n"
+              "Use this button to quickly align and run in one step.")
+        )
+        self.addWidget(quick_align_run_b)   # << auto-disable/enable during runs
+
+        # Stop Running (with tooltip, NOT auto-managed — stays clickable)
         col += 1
-        Button(frame, text=_("Stop Running"), command=self.quick_align_stop, bg="#F44336", fg="white",
-               activebackground="#d32f2f", activeforeground="white").grid(row=row, column=col, sticky=W)
+        stop_run_b = Button(
+            frame,
+            text=_("Stop Running"),
+            command=self.quick_align_stop,
+            bg="#F44336", fg="white",
+            activebackground="#d32f2f", activeforeground="white"
+        )
+        stop_run_b.grid(row=row, column=col, sticky=W)
+        tkExtra.Balloon.set(
+            stop_run_b,
+            _("Immediately pauses/halts the current operation, retracts the probe, "
+              "and cancels scheduled tasks. Use if you need to abort safely.")
+        )
 
         frame.grid_columnconfigure(1, weight=1)
         self.loadConfig()
@@ -1567,6 +1602,17 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         return True
 
     def quick_align_run(self):
+
+        gen = getattr(self.app, "surfalign_gen_gcode_frame", None)
+        if gen is not None:
+            try:
+                gen.generateGcode()
+            except Exception as e:
+                print("GenerateGcode failed:", e)
+        else:
+            print("GenGcodeFrame not found; skipping G-code generation")
+            return
+
         # Start fresh: clear any previous stop & cancel previous timers
         self._cancel_after_callbacks()
         self.stop_quick_align = False
