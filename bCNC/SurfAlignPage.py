@@ -389,6 +389,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             self.engraveDepth.set(cfg["depth"])
         if "layerHeight" in cfg and cfg["layerHeight"] is not None:
             self.layerHeight.set(cfg["layerHeight"])
+        if "rotation" in cfg and cfg["rotation"] is not None:
+            self.rotation.set(cfg["rotation"])
 
     def _on_main_lid_changed(self, event=None):
         """When user selects a lid in the main UI, apply its defaults."""
@@ -998,9 +1000,14 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         df_layer = tkExtra.FloatEntry(right, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
         df_layer.grid(row=2, column=1, sticky=W, pady=(0, 4))
 
-        # Compact buttons row
+        # NEW: Rotation default
+        Label(right, text=_("Rotation (deg):")).grid(row=3, column=0, sticky=E, padx=(0, 6), pady=(0, 4))
+        df_rotation = tkExtra.FloatEntry(right, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_rotation.grid(row=3, column=1, sticky=W, pady=(0, 4))
+
+        # Compact buttons row (shifted down by 1)
         btns = Frame(right)
-        btns.grid(row=3, column=0, columnspan=2, sticky=W, pady=(8, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky=W, pady=(8, 0))
         save_btn = Button(btns, text=_("💾 Save"), padx=8, pady=2)
         save_btn.pack(side=LEFT)
         clear_btn = Button(btns, text=_("Clear"), padx=8, pady=2)
@@ -1021,6 +1028,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
+            df_rotation.set("")  # NEW
             if not lid_name:
                 return
             cfg = self._lid_defaults.get(lid_name, {})
@@ -1031,6 +1039,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     df_depth.set(cfg["depth"])
                 if cfg.get("layerHeight") is not None:
                     df_layer.set(cfg["layerHeight"])
+                if cfg.get("rotation") is not None:   # NEW
+                    df_rotation.set(cfg["rotation"])
 
         def save_defaults_for_selected():
             lid_name = get_selected_lid()
@@ -1038,9 +1048,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 messagebox.showwarning(_("No Selection"), _("Please select a lid to save defaults."), parent=dialog)
                 return
             cfg = dict(self._lid_defaults.get(lid_name, {}))
-            cfg["fontSize"] = _float_or_none(df_font_size.get())
-            cfg["depth"] = _float_or_none(df_depth.get())
+            cfg["fontSize"]    = _float_or_none(df_font_size.get())
+            cfg["depth"]       = _float_or_none(df_depth.get())
             cfg["layerHeight"] = _float_or_none(df_layer.get())
+            cfg["rotation"]    = _float_or_none(df_rotation.get())
             self._lid_defaults[lid_name] = cfg
             self._save_lid_defaults()
             messagebox.showinfo(_("Saved"), _("Default config saved for ‘{}’.").format(lid_name), parent=dialog)
@@ -1051,7 +1062,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 messagebox.showwarning(_("No Selection"), _("Please select a lid to clear defaults."), parent=dialog)
                 return
             if lid_name in self._lid_defaults:
-                for k in ("fontSize", "depth", "layerHeight"):
+                for k in ("fontSize", "depth", "layerHeight", "rotation"):  # include rotation
                     self._lid_defaults[lid_name].pop(k, None)
                 if not self._lid_defaults[lid_name]:
                     del self._lid_defaults[lid_name]
@@ -1060,6 +1071,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
+            df_rotation.set("")
             messagebox.showinfo(_("Cleared"), _("Default config cleared for ‘{}’.").format(lid_name), parent=dialog)
 
         # ====== Add/Delete (with blanking) ======
@@ -1080,6 +1092,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
+            df_rotation.set("")  # NEW
 
         def delete_and_blank():
             self.delete_lid_from_dialog(lid_listbox, dialog)
@@ -1087,8 +1100,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
+            df_rotation.set("")
 
-        # Wire buttons
+            # Wire buttons
         add_btn.config(command=add_and_blank)
         delete_btn.config(command=delete_and_blank)
         save_btn.config(command=save_defaults_for_selected)
