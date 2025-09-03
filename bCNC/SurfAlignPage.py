@@ -779,7 +779,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         generate_b = Button(frame, text=_("Generate"), command=self.generateGcode, padx=2, pady=1)
         generate_b.grid(row=row, column=col, sticky=EW)
         self.addWidget(generate_b)
-        
+
 
 
 
@@ -917,87 +917,107 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             [widget.grid() for widget in pos_widgets]
 
     def show_edit_lid_dialog(self):
-        """Show a popup dialog for adding/deleting lid names and per-lid defaults (Font Size, Depth, Layer Height)."""
+        """Compact popup to manage lids and per-lid defaults (Font Size, Depth, Layer Height)."""
         # Ensure defaults map exists in memory
         if not hasattr(self, "_lid_defaults"):
             self._lid_defaults = self._load_lid_defaults()
 
+        # local helper to parse floats
+        def _float_or_none(v):
+            try:
+                return float(v)
+            except Exception:
+                return None
+
         dialog = Toplevel(self)
-        dialog.title(_("Add/Delete Lid"))
-        dialog.geometry("400x560")
-        dialog.resizable(False, False)
+        dialog.title(_("Lids & Defaults"))
+        # wider, shorter (space-saving vs tall)
+        dialog.geometry("560x360")
+        dialog.resizable(True, True)
         dialog.transient(self)
         dialog.grab_set()
         dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
-        
-        # Add new lid section
-        add_frame = LabelFrame(dialog, text=_("Add New Lid"), padx=10, pady=10)
-        add_frame.pack(fill=X, padx=10, pady=(10, 5))
-        
-        Label(add_frame, text=_("Lid Name:")).grid(row=0, column=0, sticky=W, pady=(0, 5))
-        new_lid_entry = Entry(add_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=25)
-        new_lid_entry.grid(row=1, column=0, columnspan=2, sticky=EW, pady=(0, 5))
+
+        # ====== Top row: Add new lid (inline) ======
+        top = Frame(dialog)
+        top.pack(fill=X, padx=10, pady=(10, 6))
+
+        Label(top, text=_("Lid:")).grid(row=0, column=0, sticky=E, padx=(0, 6))
+        new_lid_entry = Entry(top, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=32)
+        new_lid_entry.grid(row=0, column=1, sticky=EW)
         new_lid_entry.focus_set()
-        
-        Label(add_frame, text=_("Format: {name}-{height}x{width} (e.g., Vitamin_XL_Pill-300x1200)"), 
-              fg="gray", font=("TkDefaultFont", 8)).grid(row=2, column=0, columnspan=2, sticky=W, pady=(0, 5))
-        
-        Label(add_frame, text=_("Note: All dimensions are in millimeters (mm)"), 
-              fg="blue", font=("TkDefaultFont", 8)).grid(row=3, column=0, columnspan=2, sticky=W, pady=(0, 5))
-        
-        add_button = Button(add_frame, text=_("Add"), command=lambda: self.add_lid_from_dialog(new_lid_entry.get().strip(), dialog, lid_listbox), padx=10, pady=2)
-        add_button.grid(row=4, column=0, sticky=W, pady=(5, 0))
-        
-        # Existing lids section
-        existing_frame = LabelFrame(dialog, text=_("Existing Lids"), padx=10, pady=10)
-        existing_frame.pack(fill=BOTH, expand=True, padx=10, pady=(5, 10))
-        
-        # Listbox with scrollbar for existing lids
-        list_frame = Frame(existing_frame)
+
+        add_btn = Button(top, text=_("➕ Add Lid"), width=14, padx=8, pady=2)
+        add_btn.grid(row=0, column=2, padx=(8, 0), sticky=W)
+
+        # subtle inline hint (space-saving vs long paragraphs)
+        hint = Label(top,
+                     text=_("{name}-{height}x{width}, mm units  e.g.  Vitamin_XL_Pill-300x1200"),
+                     fg="gray", font=("TkDefaultFont", 8))
+        hint.grid(row=1, column=1, columnspan=2, sticky=W, pady=(4, 0))
+
+        top.columnconfigure(1, weight=1)
+
+        # ====== Main content: left (list) | right (defaults) ======
+        content = Frame(dialog)
+        content.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # -- LEFT: Existing lids + Delete
+        left = LabelFrame(content, text=_("Existing Lids"), padx=8, pady=8)
+        left.pack(side=LEFT, fill=BOTH, expand=True)
+
+        list_frame = Frame(left)
         list_frame.pack(fill=BOTH, expand=True)
-        
-        lid_listbox = tkinter.Listbox(list_frame, height=8)
+        lid_listbox = tkinter.Listbox(list_frame, height=10)
         lid_listbox.pack(side=LEFT, fill=BOTH, expand=True)
-        
         scrollbar = tkinter.Scrollbar(list_frame, orient=VERTICAL, command=lid_listbox.yview)
         scrollbar.pack(side=RIGHT, fill=Y)
         lid_listbox.config(yscrollcommand=scrollbar.set)
-        
-        # Populate listbox with existing lids
+
+        # Fill list
         for lid in self.lid_list:
             lid_listbox.insert(END, lid)
-        
-        # Delete button
-        delete_button = Button(existing_frame, text=_("Delete Selected"), 
-                              command=lambda: self.delete_lid_from_dialog(lid_listbox, dialog), 
-                              padx=10, pady=2, bg="#F44336", fg="white")
-        delete_button.pack(pady=(5, 0))
 
-        # ---------------- Default Config (selected lid) ----------------
-        defaults_frame = LabelFrame(dialog, text=_("Default Config (selected lid)"), padx=10, pady=10)
-        defaults_frame.pack(fill=X, padx=10, pady=(0, 10))
+        delete_btn = Button(left, text=_("🗑 Delete Selected Lid"), width=20,
+                            bg="#F44336", fg="white", padx=8, pady=2)
+        delete_btn.pack(pady=(8, 0), anchor="w")
 
-        # Fields: Font Size, Depth, Layer Height
-        Label(defaults_frame, text=_("Font Size (mm):")).grid(row=0, column=0, sticky=E, padx=(0, 6))
-        df_font_size = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
-        df_font_size.grid(row=0, column=1, sticky=W)
+        # -- RIGHT: Defaults (compact grid)
+        right = LabelFrame(content, text=_("Defaults (selected lid)"), padx=8, pady=8)
+        right.pack(side=LEFT, fill=Y, padx=(10, 0))
 
-        Label(defaults_frame, text=_("Depth (mm):")).grid(row=1, column=0, sticky=E, padx=(0, 6))
-        df_depth = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
-        df_depth.grid(row=1, column=1, sticky=W)
+        Label(right, text=_("Font Size (mm):")).grid(row=0, column=0, sticky=E, padx=(0, 6), pady=(0, 4))
+        df_font_size = tkExtra.FloatEntry(right, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_font_size.grid(row=0, column=1, sticky=W, pady=(0, 4))
 
-        Label(defaults_frame, text=_("Layer Height (mm):")).grid(row=2, column=0, sticky=E, padx=(0, 6))
-        df_layer = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
-        df_layer.grid(row=2, column=1, sticky=W)
+        Label(right, text=_("Depth (mm):")).grid(row=1, column=0, sticky=E, padx=(0, 6), pady=(0, 4))
+        df_depth = tkExtra.FloatEntry(right, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_depth.grid(row=1, column=1, sticky=W, pady=(0, 4))
 
-        # Helpers to manage defaults
+        Label(right, text=_("Layer Height (mm):")).grid(row=2, column=0, sticky=E, padx=(0, 6), pady=(0, 4))
+        df_layer = tkExtra.FloatEntry(right, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_layer.grid(row=2, column=1, sticky=W, pady=(0, 4))
+
+        # Compact buttons row
+        btns = Frame(right)
+        btns.grid(row=3, column=0, columnspan=2, sticky=W, pady=(8, 0))
+        save_btn = Button(btns, text=_("💾 Save"), padx=8, pady=2)
+        save_btn.pack(side=LEFT)
+        clear_btn = Button(btns, text=_("Clear"), padx=8, pady=2)
+        clear_btn.pack(side=LEFT, padx=(8, 0))
+
+        # ====== Bottom: Close ======
+        bottom = Frame(dialog)
+        bottom.pack(fill=X, padx=10, pady=(0, 10))
+        Button(bottom, text=_("Close"), command=dialog.destroy, padx=10, pady=2).pack(side=RIGHT)
+
+        # ====== Helpers (selection & defaults I/O) ======
         def get_selected_lid():
             sel = lid_listbox.curselection()
-            if not sel:
-                return None
-            return lid_listbox.get(sel[0])
+            return lid_listbox.get(sel[0]) if sel else None
 
         def load_defaults_ui_for(lid_name):
+            # blank first (space-saving + clarity)
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
@@ -1018,9 +1038,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 messagebox.showwarning(_("No Selection"), _("Please select a lid to save defaults."), parent=dialog)
                 return
             cfg = dict(self._lid_defaults.get(lid_name, {}))
-            cfg["fontSize"] = self._float_or_none(df_font_size.get())
-            cfg["depth"] = self._float_or_none(df_depth.get())
-            cfg["layerHeight"] = self._float_or_none(df_layer.get())
+            cfg["fontSize"] = _float_or_none(df_font_size.get())
+            cfg["depth"] = _float_or_none(df_depth.get())
+            cfg["layerHeight"] = _float_or_none(df_layer.get())
             self._lid_defaults[lid_name] = cfg
             self._save_lid_defaults()
             messagebox.showinfo(_("Saved"), _("Default config saved for ‘{}’.").format(lid_name), parent=dialog)
@@ -1032,32 +1052,54 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 return
             if lid_name in self._lid_defaults:
                 for k in ("fontSize", "depth", "layerHeight"):
-                    try:
-                        self._lid_defaults[lid_name].pop(k, None)
-                    except Exception:
-                        pass
+                    self._lid_defaults[lid_name].pop(k, None)
                 if not self._lid_defaults[lid_name]:
                     del self._lid_defaults[lid_name]
                 self._save_lid_defaults()
+            # blank fields
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
             messagebox.showinfo(_("Cleared"), _("Default config cleared for ‘{}’.").format(lid_name), parent=dialog)
 
-        defaults_btns = Frame(defaults_frame)
-        defaults_btns.grid(row=3, column=0, columnspan=2, sticky=W, pady=(8, 0))
-        Button(defaults_btns, text=_("💾 Save Defaults"), command=save_defaults_for_selected, padx=8, pady=2)\
-            .pack(side=LEFT)
-        Button(defaults_btns, text=_("Clear Defaults"), command=clear_defaults_for_selected, padx=8, pady=2)\
-            .pack(side=LEFT, padx=(8, 0))
+        # ====== Add/Delete (with blanking) ======
+        def add_and_blank(*_):
+            name = new_lid_entry.get().strip()
+            if not name:
+                return
+            self.add_lid_from_dialog(name, dialog, lid_listbox)
+            # select the newly added lid
+            try:
+                idx = self.lid_list.index(name)
+                lid_listbox.selection_clear(0, END)
+                lid_listbox.selection_set(idx)
+                lid_listbox.see(idx)
+            except Exception:
+                pass
+            # blank defaults inputs
+            df_font_size.set("")
+            df_depth.set("")
+            df_layer.set("")
 
-        # Load defaults when list selection changes
-        def on_list_select(_evt=None):
-            load_defaults_ui_for(get_selected_lid())
+        def delete_and_blank():
+            self.delete_lid_from_dialog(lid_listbox, dialog)
+            lid_listbox.selection_clear(0, END)
+            df_font_size.set("")
+            df_depth.set("")
+            df_layer.set("")
 
-        lid_listbox.bind('<<ListboxSelect>>', on_list_select)
+        # Wire buttons
+        add_btn.config(command=add_and_blank)
+        delete_btn.config(command=delete_and_blank)
+        save_btn.config(command=save_defaults_for_selected)
+        clear_btn.config(command=clear_defaults_for_selected)
 
-        # If current lid is in the list, preselect and load its defaults
+        # Selection behavior
+        lid_listbox.bind('<<ListboxSelect>>', lambda _e=None: load_defaults_ui_for(get_selected_lid()))
+        new_lid_entry.bind('<Return>', add_and_blank)
+        dialog.bind('<Escape>', lambda _e=None: dialog.destroy())
+
+        # Preselect current lid if present
         try:
             if self.lidName.get():
                 idx = self.lid_list.index(self.lidName.get())
@@ -1068,17 +1110,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         except Exception:
             pass
 
-        # Bottom buttons
-        button_frame = Frame(dialog)
-        button_frame.pack(fill=X, padx=10, pady=(0, 10))
-        
-        Button(button_frame, text=_("Close"), command=dialog.destroy, padx=10, pady=2).pack(side=RIGHT)
-        
-        # Bind events
-        new_lid_entry.bind('<Return>', lambda event: self.add_lid_from_dialog(new_lid_entry.get().strip(), dialog, lid_listbox))
-        dialog.bind('<Escape>', lambda event: dialog.destroy())
-        
-        add_frame.columnconfigure(1, weight=1)
+        # Resize behavior
+        left.pack_propagate(False)
+        list_frame.pack_propagate(False)
 
     def validate_lid_format(self, lid_name):
         """Validate that the lid name follows the format {name}-{height}x{width}."""
