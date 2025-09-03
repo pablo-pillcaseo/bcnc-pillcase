@@ -351,6 +351,50 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     tlo = None
     probeCmd = None
 
+    # ===================== Lid Defaults (FontSize/Depth/LayerHeight) =====================
+    def _load_lid_defaults(self):
+        """Return {lid_name: {'fontSize': float|None, 'depth': float|None, 'layerHeight': float|None}}"""
+        try:
+            import json
+            raw = Utils.getStr("SurfAlign", "lidDefaults")
+            return json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    def _save_lid_defaults(self):
+        try:
+            import json
+            Utils.setStr("SurfAlign", "lidDefaults", json.dumps(self._lid_defaults))
+        except Exception:
+            pass
+
+    def _float_or_none(self, v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def _apply_defaults_to_main_fields_if_available(self, lid=None):
+        """Apply saved defaults for given lid (or current) to main 3 fields."""
+        if lid is None:
+            lid = self.lidName.get().strip()
+        if not lid:
+            return
+        cfg = getattr(self, "_lid_defaults", {}).get(lid, {})
+        if not isinstance(cfg, dict):
+            return
+        if "fontSize" in cfg and cfg["fontSize"] is not None:
+            self.fontSize.set(cfg["fontSize"])
+        if "depth" in cfg and cfg["depth"] is not None:
+            self.engraveDepth.set(cfg["depth"])
+        if "layerHeight" in cfg and cfg["layerHeight"] is not None:
+            self.layerHeight.set(cfg["layerHeight"])
+
+    def _on_main_lid_changed(self, event=None):
+        """When user selects a lid in the main UI, apply its defaults."""
+        self._apply_defaults_to_main_fields_if_available()
+    # =====================================================================================
+
     def get_installed_font_names(self):
         font_dir = os.path.join(os.environ['WINDIR'], 'Fonts')
         font_names = []
@@ -569,7 +613,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.lidName_selector.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.lidName_selector, _("Select lid name"))
         self.addWidget(self.lidName_selector)
-        
+        # Auto-apply saved defaults for selected lid
+        self.lidName_selector.bind('<<ComboboxSelected>>', self._on_main_lid_changed)
+
         col += 1
         self.edit_lid_button = Button(lframe(), text=_("Edit"), command=self.show_edit_lid_dialog, padx=2, pady=1)
         self.edit_lid_button.grid(row=row, column=col, sticky=EW)
@@ -741,6 +787,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.loadConfig()
         
     def loadConfig(self):
+        # Load all lids' defaults first
+        self._lid_defaults = self._load_lid_defaults()
+
         self.engraveText.set(Utils.getStr("SurfAlign", "engraveText"))
         self.font_var.set(Utils.getStr("SurfAlign", "textFont"))
         self.fontSize.set(Utils.getFloat("SurfAlign", "fontSize"))
@@ -760,7 +809,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.gapDistance.set(Utils.getFloat("SurfAlign", "gapDistance"))
         
         self.on_text_positioning_change(None)
-        
+
+        # If a lid is already selected, apply its saved defaults to the three fields
+        if self.lidName.get().strip():
+            self._apply_defaults_to_main_fields_if_available(self.lidName.get().strip())
+
     def generateGcode(self):
         print("Generate Gcode")
         engrave_text = self.engraveText.get()
@@ -863,13 +916,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             [widget.grid_remove() for widget in lid_center_widgets]
             [widget.grid() for widget in pos_widgets]
 
-        
-
     def show_edit_lid_dialog(self):
-        """Show a popup dialog for adding/deleting lid names."""
+        """Show a popup dialog for adding/deleting lid names and per-lid defaults (Font Size, Depth, Layer Height)."""
+        # Ensure defaults map exists in memory
+        if not hasattr(self, "_lid_defaults"):
+            self._lid_defaults = self._load_lid_defaults()
+
         dialog = Toplevel(self)
         dialog.title(_("Add/Delete Lid"))
-        dialog.geometry("400x500")
+        dialog.geometry("400x560")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
@@ -917,7 +972,102 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                               command=lambda: self.delete_lid_from_dialog(lid_listbox, dialog), 
                               padx=10, pady=2, bg="#F44336", fg="white")
         delete_button.pack(pady=(5, 0))
-        
+
+        # ---------------- Default Config (selected lid) ----------------
+        defaults_frame = LabelFrame(dialog, text=_("Default Config (selected lid)"), padx=10, pady=10)
+        defaults_frame.pack(fill=X, padx=10, pady=(0, 10))
+
+        # Fields: Font Size, Depth, Layer Height
+        Label(defaults_frame, text=_("Font Size (mm):")).grid(row=0, column=0, sticky=E, padx=(0, 6))
+        df_font_size = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_font_size.grid(row=0, column=1, sticky=W)
+
+        Label(defaults_frame, text=_("Depth (mm):")).grid(row=1, column=0, sticky=E, padx=(0, 6))
+        df_depth = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_depth.grid(row=1, column=1, sticky=W)
+
+        Label(defaults_frame, text=_("Layer Height (mm):")).grid(row=2, column=0, sticky=E, padx=(0, 6))
+        df_layer = tkExtra.FloatEntry(defaults_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=10)
+        df_layer.grid(row=2, column=1, sticky=W)
+
+        # Helpers to manage defaults
+        def get_selected_lid():
+            sel = lid_listbox.curselection()
+            if not sel:
+                return None
+            return lid_listbox.get(sel[0])
+
+        def load_defaults_ui_for(lid_name):
+            df_font_size.set("")
+            df_depth.set("")
+            df_layer.set("")
+            if not lid_name:
+                return
+            cfg = self._lid_defaults.get(lid_name, {})
+            if isinstance(cfg, dict):
+                if cfg.get("fontSize") is not None:
+                    df_font_size.set(cfg["fontSize"])
+                if cfg.get("depth") is not None:
+                    df_depth.set(cfg["depth"])
+                if cfg.get("layerHeight") is not None:
+                    df_layer.set(cfg["layerHeight"])
+
+        def save_defaults_for_selected():
+            lid_name = get_selected_lid()
+            if not lid_name:
+                messagebox.showwarning(_("No Selection"), _("Please select a lid to save defaults."), parent=dialog)
+                return
+            cfg = dict(self._lid_defaults.get(lid_name, {}))
+            cfg["fontSize"] = self._float_or_none(df_font_size.get())
+            cfg["depth"] = self._float_or_none(df_depth.get())
+            cfg["layerHeight"] = self._float_or_none(df_layer.get())
+            self._lid_defaults[lid_name] = cfg
+            self._save_lid_defaults()
+            messagebox.showinfo(_("Saved"), _("Default config saved for ‘{}’.").format(lid_name), parent=dialog)
+
+        def clear_defaults_for_selected():
+            lid_name = get_selected_lid()
+            if not lid_name:
+                messagebox.showwarning(_("No Selection"), _("Please select a lid to clear defaults."), parent=dialog)
+                return
+            if lid_name in self._lid_defaults:
+                for k in ("fontSize", "depth", "layerHeight"):
+                    try:
+                        self._lid_defaults[lid_name].pop(k, None)
+                    except Exception:
+                        pass
+                if not self._lid_defaults[lid_name]:
+                    del self._lid_defaults[lid_name]
+                self._save_lid_defaults()
+            df_font_size.set("")
+            df_depth.set("")
+            df_layer.set("")
+            messagebox.showinfo(_("Cleared"), _("Default config cleared for ‘{}’.").format(lid_name), parent=dialog)
+
+        defaults_btns = Frame(defaults_frame)
+        defaults_btns.grid(row=3, column=0, columnspan=2, sticky=W, pady=(8, 0))
+        Button(defaults_btns, text=_("💾 Save Defaults"), command=save_defaults_for_selected, padx=8, pady=2)\
+            .pack(side=LEFT)
+        Button(defaults_btns, text=_("Clear Defaults"), command=clear_defaults_for_selected, padx=8, pady=2)\
+            .pack(side=LEFT, padx=(8, 0))
+
+        # Load defaults when list selection changes
+        def on_list_select(_evt=None):
+            load_defaults_ui_for(get_selected_lid())
+
+        lid_listbox.bind('<<ListboxSelect>>', on_list_select)
+
+        # If current lid is in the list, preselect and load its defaults
+        try:
+            if self.lidName.get():
+                idx = self.lid_list.index(self.lidName.get())
+                lid_listbox.selection_clear(0, END)
+                lid_listbox.selection_set(idx)
+                lid_listbox.see(idx)
+                load_defaults_ui_for(self.lidName.get())
+        except Exception:
+            pass
+
         # Bottom buttons
         button_frame = Frame(dialog)
         button_frame.pack(fill=X, padx=10, pady=(0, 10))
@@ -1015,7 +1165,17 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         lid_listbox.delete(0, END)
         for lid in self.lid_list:
             lid_listbox.insert(END, lid)
-        
+
+        # Also remove its saved defaults
+        try:
+            if not hasattr(self, "_lid_defaults"):
+                self._lid_defaults = self._load_lid_defaults()
+            if selected_lid in self._lid_defaults:
+                del self._lid_defaults[selected_lid]
+                self._save_lid_defaults()
+        except Exception:
+            pass
+
         self.saveConfig()
         messagebox.showinfo(_("Success"), _("Lid name '{}' has been deleted from the list.").format(selected_lid), parent=dialog)
 
