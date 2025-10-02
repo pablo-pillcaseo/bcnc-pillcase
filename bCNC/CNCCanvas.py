@@ -255,6 +255,9 @@ class CNCCanvas(Canvas):
 
         self.draw_axes = True  # Drawing flags
         self.draw_grid = True
+        self.draw_lid_outline = True
+        self.lid_outline_cords = None
+
         self.draw_margin = True
         self.draw_probe = True
         self.draw_workarea = True
@@ -1391,6 +1394,7 @@ class CNCCanvas(Canvas):
 
         self.drawPaths()
         self.drawGrid()
+        self.drawLidOutline()
         self.drawMargin()
         self.drawWorkarea()
         self.drawProbe()
@@ -1641,6 +1645,58 @@ class CNCCanvas(Canvas):
                     self.plotCoords(xyz), fill=GRID_COLOR, tag="Grid", dash=(1, 3)
                 )
                 self.tag_lower(item)
+
+    def drawLidOutline(self, outline_cords=None):
+        """
+        Draws a rectangular outline (lid outline) between two world coordinates.
+        corner1: (x0, y0) in mm
+        corner2: (x1, y1) in mm
+        """
+        self.delete("LidOutline")
+        if not self.draw_lid_outline:
+            return
+        
+        # Determine corner coordinates
+        if outline_cords:
+            self.lid_outline_cords = outline_cords
+            corner1, corner2 = outline_cords[0], outline_cords[1]
+        else:
+            # Get dimensions from GenGcodeFrame
+            gen_frame = getattr(self.app, 'surfalign_gen_gcode_frame', None)
+            if gen_frame:
+                width, height = gen_frame.get_lid_dimensions()
+                if width is not None and height is not None:
+                    corner1, corner2 = (0, 0), (width, -height)
+                else:
+                    return  # No valid dimensions available
+            else:
+                return  # GenGcodeFrame not available
+
+        # Extract coordinates and ensure proper ordering
+        x0, y0 = corner1
+        x1, y1 = corner2
+        xmin, xmax = sorted([x0, x1])
+        ymin, ymax = sorted([y0, y1])
+
+        # Define rectangle corners (z=0 for 2D plane)
+        corners = [
+            (xmin, ymin, 0),  # bottom-left
+            (xmax, ymin, 0),  # bottom-right
+            (xmax, ymax, 0),  # top-right
+            (xmin, ymax, 0)   # top-left
+        ]
+
+        # Draw rectangle outline
+        for i in range(4):
+            seg = [corners[i], corners[(i + 1) % 4]]
+            item = self.create_line(
+                self.plotCoords(seg),
+                fill="Red",
+                width=2,
+                tag="LidOutline",
+                dash=(8, 2)
+            )
+            self.tag_raise(item)
 
     # ----------------------------------------------------------------------
     # Display orientation markers
@@ -2088,6 +2144,7 @@ class CanvasFrame(Frame):
 
         self.draw_axes = BooleanVar()
         self.draw_grid = BooleanVar()
+        self.draw_lid_outline = BooleanVar()
         self.draw_margin = BooleanVar()
         self.draw_probe = BooleanVar()
         self.draw_paths = BooleanVar()
@@ -2133,6 +2190,7 @@ class CanvasFrame(Frame):
 
         self.draw_axes.set(bool(int(Utils.getBool("Canvas", "axes", True))))
         self.draw_grid.set(bool(int(Utils.getBool("Canvas", "grid", True))))
+        self.draw_lid_outline.set(bool(int(Utils.getBool("Canvas", "lid_outline", True))))
         self.draw_margin.set(bool(int(Utils.getBool("Canvas", "margin", True))))
         self.draw_paths.set(bool(int(Utils.getBool("Canvas", "paths", True))))
         self.draw_rapid.set(bool(int(Utils.getBool("Canvas", "rapid", True))))
@@ -2166,6 +2224,7 @@ class CanvasFrame(Frame):
         Utils.setStr("Canvas", "view", self.view.get())
         Utils.setBool("Canvas", "axes", self.draw_axes.get())
         Utils.setBool("Canvas", "grid", self.draw_grid.get())
+        Utils.setBool("Canvas", "lid_outline", self.draw_lid_outline.get())
         Utils.setBool("Canvas", "margin", self.draw_margin.get())
         Utils.setBool("Canvas", "probe", self.draw_probe.get())
         Utils.setBool("Canvas", "paths", self.draw_paths.get())
@@ -2271,6 +2330,18 @@ class CanvasFrame(Frame):
         )
         tkExtra.Balloon.set(b, _("Toggle display of grid lines"))
         b.pack(side=LEFT)
+
+        b2 = Checkbutton(
+            toolbar,
+            image=Utils.icons.get("grid"),  # <-- you’ll need to add "lid" icon to Utils.icons
+            indicatoron=False,
+            variable=self.draw_lid_outline,  # BooleanVar() you define in __init__
+            command=self.drawLidOutline,
+            padx=2, pady=2,
+            relief="flat"
+        )
+        tkExtra.Balloon.set(b2, _("Toggle display of lid outline"))
+        b2.pack(side=LEFT, padx=1, pady=1)
 
         b = Checkbutton(
             toolbar,
@@ -2388,6 +2459,7 @@ class CanvasFrame(Frame):
     def toggleDrawFlag(self):
         self.canvas.draw_axes = self.draw_axes.get()
         self.canvas.draw_grid = self.draw_grid.get()
+        self.canvas.draw_lid_outline = self.draw_lid_outline.get()
         self.canvas.draw_margin = self.draw_margin.get()
         self.canvas.draw_probe = self.draw_probe.get()
         self.canvas.draw_paths = self.draw_paths.get()
@@ -2408,6 +2480,12 @@ class CanvasFrame(Frame):
             self.draw_grid.set(value)
         self.canvas.draw_grid = self.draw_grid.get()
         self.canvas.drawGrid()
+
+    def drawLidOutline(self, value=None):
+        if value is not None:
+            self.draw_lid_outline.set(value)
+        self.canvas.draw_lid_outline = self.draw_lid_outline.get()
+        self.canvas.drawLidOutline()
 
     # ----------------------------------------------------------------------
     def drawMargin(self, value=None):

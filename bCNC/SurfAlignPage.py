@@ -395,6 +395,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     def _on_main_lid_changed(self, event=None):
         """When user selects a lid in the main UI, apply its defaults."""
         self._apply_defaults_to_main_fields_if_available()
+        width, height = self.get_lid_dimensions()
+        outline_cords=(0, 0), (width, -1 * height)
+        self.app.canvasFrame.canvas.drawLidOutline(outline_cords)
     # =====================================================================================
 
     def get_installed_font_names(self):
