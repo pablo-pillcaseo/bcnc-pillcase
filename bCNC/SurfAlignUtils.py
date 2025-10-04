@@ -79,25 +79,56 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
     sys.stderr = stderr_capture
 
     def _recenter_geometry_and_origin(obj):
-        """Set origin to COM for Y/Z, but adjust origin X to bounding-box center without moving geometry."""
+        """
+        Set origin manually (no bpy.ops):
+          X = bounding-box center,
+          Y,Z = surface-area–weighted center of mass (COM).
+        Geometry is shifted so the object appears unchanged in world space.
+        """
+
+
         bpy.context.view_layer.update()
 
-        # --- 1) Set origin to center of mass first (affects Y and Z)
-        obj.select_set(True)
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.origin_set(type='ORIGIN_CENTER_OF_MASS', center='BOUNDS')
-        bpy.context.view_layer.update()
+        # Get mesh data (evaluated, includes modifiers)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        ob_eval = obj.evaluated_get(depsgraph)
+        mesh = ob_eval.to_mesh(preserve_all_data_layers=False)
 
-        # --- 2) Get bounding-box X center in local coordinates
-        bb = obj.bound_box
-        cx = (min(v[0] for v in bb) + max(v[0] for v in bb)) / 2
+        verts = mesh.vertices
 
-        # --- 3) Shift origin along X only (local space)
-        # Build a translation matrix for origin offset
-        offset = mathutils.Vector((-cx, 0.0, 0.0))
-        obj.data.transform(mathutils.Matrix.Translation(offset))
+        # --- 1) Bounding-box X center
+        min_x = min(v.co.x for v in verts)
+        max_x = max(v.co.x for v in verts)
+        cx = (min_x + max_x) * 0.5
 
-        # --- 4) Update viewport
+        # --- 2) Compute surface-area weighted COM for Y and Z
+        mesh.calc_loop_triangles()
+        total_area = 0.0
+        com = mathutils.Vector((0.0, 0.0, 0.0))
+        for tri in mesh.loop_triangles:
+            v0 = verts[tri.vertices[0]].co
+            v1 = verts[tri.vertices[1]].co
+            v2 = verts[tri.vertices[2]].co
+            area = (v1 - v0).cross(v2 - v0).length / 2.0
+            if area > 0:
+                centroid = (v0 + v1 + v2) / 3.0
+                com += centroid * area
+                total_area += area
+
+        if total_area > 0:
+            com /= total_area
+        else:
+            # fallback: vertex average
+            com = sum((v.co for v in verts), mathutils.Vector()) / len(verts)
+
+        # --- 3) Compose the target origin point in local coordinates
+        target_origin = mathutils.Vector((cx, com.y, com.z))
+
+        # --- 4) Apply translation to mesh data (move geometry)
+        obj.data.transform(mathutils.Matrix.Translation(-target_origin))
+
+        # --- 5) Cleanup
+        ob_eval.to_mesh_clear()
         bpy.context.view_layer.update()
 
     try:
