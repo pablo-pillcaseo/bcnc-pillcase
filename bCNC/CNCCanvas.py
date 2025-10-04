@@ -2333,12 +2333,10 @@ class CanvasFrame(Frame):
 
         b2 = Checkbutton(
             toolbar,
-            image=Utils.icons.get("grid"),  # <-- you’ll need to add "lid" icon to Utils.icons
+            image=Utils.icons.get("outline"),  # <-- you’ll need to add "lid" icon to Utils.icons
             indicatoron=False,
             variable=self.draw_lid_outline,  # BooleanVar() you define in __init__
             command=self.drawLidOutline,
-            padx=2, pady=2,
-            relief="flat"
         )
         tkExtra.Balloon.set(b2, _("Toggle display of lid outline"))
         b2.pack(side=LEFT, padx=1, pady=1)
