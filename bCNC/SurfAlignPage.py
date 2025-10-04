@@ -647,6 +647,37 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(self.center_offset_y, _("Text Position Offset from Lid Center Y"))
         self.addWidget(self.center_offset_y)
         
+        row += 1
+        col = 0
+        Label(lframe(), text=_("Y Adj Factor:")).grid(row=row, column=col, sticky=E)
+        col += 1
+        self.yAdjustFactor = Scale(
+            lframe(), 
+            from_=0, 
+            to=1, 
+            resolution=0.01,
+            orient=HORIZONTAL,
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.yAdjustFactor.grid(row=row, column=col, sticky=EW)
+
+        # Descriptive label beside slider
+        col += 1
+        Label(
+            lframe(),
+            text="BBOX  <--->  COM",
+            font=("TkDefaultFont", 8, "italic"),
+        ).grid(row=row, column=col, sticky=W, padx=(4, 0))
+
+        tkExtra.Balloon.set(
+            self.yAdjustFactor,
+            _("Controls how much the Y origin is influenced by the center of mass.\n"
+              "0.0 → use bounding box center only\n"
+              "1.0 → use full center of mass\n"
+              "Values in between blend smoothly between both.")
+        )
+        self.addWidget(self.yAdjustFactor)
+        
         # Initially hide the lid selector (will be shown when "Lid Center" is selected)
         self.lid_label.grid_remove()
         self.lidName_selector.grid_remove()
@@ -804,6 +835,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.lidName.set(Utils.getStr("SurfAlign", "lidName"))
         self.center_offset_x.set(Utils.getFloat("SurfAlign", "centerOffsetX"))
         self.center_offset_y.set(Utils.getFloat("SurfAlign", "centerOffsetY"))
+        self.yAdjustFactor.set(Utils.getFloat("SurfAlign", "yAdjustFactor"))
         self.rotation.set(Utils.getFloat("SurfAlign", "rotation"))
         self.feedrate.set(Utils.getFloat("SurfAlign", "feedrate"))
         self.spindleRPM.set(Utils.getFloat("SurfAlign", "spindleRPM"))
@@ -847,7 +879,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         feedrate_mm = float(self.feedrate.get())
         spindle_rpm = float(self.spindleRPM.get())
         gap_distance_mm = float(self.gapDistance.get())
-        
+        y_adjust_factor = float(self.yAdjustFactor.get())
         try:
             gcode_file_path = setup_blender_scene(engrave_text,
                                                   font_path,
@@ -862,7 +894,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                                                    final_height_mm,
                                                    work_area_width,
                                                    work_area_height,
-                                                   gap_distance_mm)
+                                                   gap_distance_mm,
+                                                   y_adjust_factor)
             
             print("Generated Gcode file path:", gcode_file_path)
             
@@ -897,6 +930,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         Utils.setStr("SurfAlign", "lidList", ",".join(self.lid_list))
         Utils.setFloat("SurfAlign", "centerOffsetX", self.center_offset_x.get())
         Utils.setFloat("SurfAlign", "centerOffsetY", self.center_offset_y.get())
+        Utils.setFloat("SurfAlign", "yAdjustFactor", self.yAdjustFactor.get())
         Utils.setFloat("SurfAlign", "rotation", self.rotation.get())
         Utils.setFloat("SurfAlign", "feedrate", self.feedrate.get())
         Utils.setFloat("SurfAlign", "spindleRPM", self.spindleRPM.get())

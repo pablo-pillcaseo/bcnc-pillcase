@@ -60,7 +60,8 @@ def resolve_font_path(font_name):
 
 
 def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_mm, rotation_degrees,
-                        layer_height_mm, safe_height_mm, save_dir, feedrate_mm, spindle_rpm, final_height_mm, work_area_width, work_area_height, gap_distance_mm=0.2):
+                        layer_height_mm, safe_height_mm, save_dir, feedrate_mm, spindle_rpm, final_height_mm,
+                        work_area_width, work_area_height, gap_distance_mm=0.2, y_adjust_factor=1.0):
     blend_file_path = os.path.join(save_dir, "output.blend")
     # addon_name = "bl_ext.user_default.fabex"
 
@@ -78,12 +79,17 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
     sys.stdout = stdout_capture
     sys.stderr = stderr_capture
 
-    def _recenter_geometry_and_origin(obj):
+    def _recenter_geometry_and_origin(obj, y_factor=1.0):
         """
         Set origin manually (no bpy.ops):
           X = bounding-box center,
-          Y,Z = surface-area–weighted center of mass (COM).
+          Y = scaled surface-area–weighted COM (0..1 factor),
+          Z = unchanged (0)
         Geometry is shifted so the object appears unchanged in world space.
+
+        Args:
+            obj (bpy.types.Object): Mesh object
+            y_factor (float): 0 disables COM Y influence, 1 uses full COM.y
         """
 
 
@@ -96,12 +102,15 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
 
         verts = mesh.vertices
 
-        # --- 1) Bounding-box X center
+        # --- 1) Bounding-box center (X,Y) ---
         min_x = min(v.co.x for v in verts)
         max_x = max(v.co.x for v in verts)
+        min_y = min(v.co.y for v in verts)
+        max_y = max(v.co.y for v in verts)
         cx = (min_x + max_x) * 0.5
+        cy_bbox = (min_y + max_y) * 0.5  # bbox center Y
 
-        # --- 2) Compute surface-area weighted COM for Y and Z
+        # --- 2) Surface-area weighted COM ---
         mesh.calc_loop_triangles()
         total_area = 0.0
         com = mathutils.Vector((0.0, 0.0, 0.0))
@@ -121,13 +130,17 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
             # fallback: vertex average
             com = sum((v.co for v in verts), mathutils.Vector()) / len(verts)
 
-        # --- 3) Compose the target origin point in local coordinates
-        target_origin = mathutils.Vector((cx, com.y, com.z))
+        # --- 3) Interpolate Y between bbox center and COM ---
+        y_factor = max(0.0, min(1.0, y_factor))  # clamp between 0 and 1
+        cy = (1.0 - y_factor) * cy_bbox + y_factor * com.y
 
-        # --- 4) Apply translation to mesh data (move geometry)
+        # Compose target origin vector: (bbox center X, blended Y, Z=0)
+        target_origin = mathutils.Vector((cx, cy, 0.0))
+
+        # --- 4) Move geometry so new origin becomes (0,0,0) ---
         obj.data.transform(mathutils.Matrix.Translation(-target_origin))
 
-        # --- 5) Cleanup
+        # --- 5) Cleanup ---
         ob_eval.to_mesh_clear()
         bpy.context.view_layer.update()
 
@@ -207,7 +220,7 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
             bpy.context.view_layer.update()
 
             # Center geometry & origin for stable placement
-            _recenter_geometry_and_origin(text_obj)
+            _recenter_geometry_and_origin(text_obj, y_adjust_factor)
 
         else:
             # Single text object
@@ -237,7 +250,7 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
             bpy.context.view_layer.update()
 
             # Give a predictable origin/center
-            _recenter_geometry_and_origin(text_obj)
+            _recenter_geometry_and_origin(text_obj, y_adjust_factor)
 
         # Dimensions (debug)
         print("Actual Dimensions After Conversion:", tuple(text_obj.dimensions))
