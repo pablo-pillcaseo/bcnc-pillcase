@@ -5737,6 +5737,52 @@ class GCode:
 
         return candidate_centers[selected_centers]
 
+    def build_bilinear_grid(self, x_min, x_max, y_min, y_max, grid_cell_size=None, k=5):
+        """
+        Build a bilinear probing grid that EXACTLY covers G-code extents.
+        grid_cell_size: user approximate desired spacing (mm).
+        If None, compute spacing based on k for backward compatibility.
+        """
+        width = x_max - x_min
+        height = y_max - y_min
+
+        if width <= 0 or height <= 0:
+            print("❌ Invalid G-code area for bilinear grid.")
+            return None
+
+        # Derive cell size automatically if user didn't supply
+        if grid_cell_size is None or grid_cell_size <= 0:
+            approx_cells = max(1, int(np.sqrt(max(k, 1))))
+            cell_x = width / approx_cells
+            cell_y = height / approx_cells
+        else:
+            # user specified approximate cell size
+            cell_x = float(grid_cell_size)
+            cell_y = float(grid_cell_size)
+
+        # Choose integer cell counts closest to requested spacing
+        nx = max(1, int(round(width / cell_x)))
+        ny = max(1, int(round(height / cell_y)))
+
+        # Actual cell sizes that exactly span the region
+        dx = width / nx
+        dy = height / ny
+
+        xs = x_min + np.arange(nx + 1) * dx
+        ys = y_min + np.arange(ny + 1) * dy
+
+        grid_X, grid_Y = np.meshgrid(xs, ys, indexing="xy")
+        probe_points = np.column_stack((grid_X.ravel(), grid_Y.ravel()))
+
+        print("=== Bilinear Grid ===")
+        print(f"G-code width/height = {width:.3f} × {height:.3f}")
+        print(f"Requested approx cell size = {grid_cell_size}")
+        print(f"Chosen cells: nx={nx}, ny={ny}")
+        print(f"Actual cell size = dx={dx:.3f}, dy={dy:.3f}")
+        print(f"Total probe points = {probe_points.shape[0]}")
+
+        return probe_points, xs, ys, dx, dy
+
     def plot_results_by_points(self, points, best_centers):
         fig, ax = plt.subplots()
         ax.scatter(points[:, 0], points[:, 1], color='blue', alpha=0.5, s=3, label="Points")
@@ -5770,15 +5816,60 @@ class GCode:
         ax.legend()
         plt.show()
 
-    def generate_and_plot_probing_points(self, method="EvenCoverage", k=5, show_plot=False):
+    def plot_bilinear_grid(self, x_min, x_max, y_min, y_max, probe_points, points=None):
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots()
+
+        # Draw cutting area rectangle
+        rect = plt.Rectangle(
+            (x_min, y_min),
+            x_max - x_min,
+            y_max - y_min,
+            linewidth=2,
+            edgecolor="black",
+            facecolor="none",
+            label="G-code Area"
+        )
+        ax.add_patch(rect)
+
+        # Optional: draw cutting points (background)
+        if points is not None:
+            ax.scatter(points[:, 0], points[:, 1], s=3, color="lightgray", alpha=0.4, label="Cut Points")
+
+        # Actual probe points
+        ax.scatter(probe_points[:, 0], probe_points[:, 1],
+                   s=20, color="red", marker="x", label="Probe Points")
+
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.legend()
+        ax.set_title("Bilinear Grid Probing Points")
+        plt.show()
+
+
+    def generate_and_plot_probing_points(
+            self,
+            method="EvenCoverage",
+            k=5,
+            show_plot=False,
+            grid_cell_size=None
+    ):
         print("Generating Probing Points")
+
+        # -----------------------------
+        # Get cutting points from G-code
+        # -----------------------------
         x_coords, y_coords, z_coords = self.make_cutting_points()
         if len(x_coords) == 0 or len(y_coords) == 0:
             messagebox.showwarning(_("Probe error"), _("No cutting points found"))
             return None
         x_min, x_max = np.min(x_coords), np.max(x_coords)
         y_min, y_max = np.min(y_coords), np.max(y_coords)
-        points = np.array([(x, y) for x, y in zip(x_coords, y_coords)])
+        points = np.column_stack((x_coords, y_coords))
+
+        optimal_centers = None
 
         if method == "EvenCoverage":
             optimal_centers = self.min_max_distance_k_centers_by_points(points, k)
@@ -5788,13 +5879,38 @@ class GCode:
                 self.plot_results_by_points(points, optimal_centers)
 
         elif method == "AreaCoverage":
-            # Find the optimal centers by rectangle
-            rectangle = (x_min, y_min, x_max, y_max)
-
-            optimal_centers = self.find_optimal_centers_by_rectangle(rectangle, points, k)
+            rect = (x_min, y_min, x_max, y_max)
+            optimal_centers = self.find_optimal_centers_by_rectangle(
+                rect, points, k
+            )
             self.surf_align_probe_points = optimal_centers
-            # Call the new plotting function
             if show_plot:
-                self.plot_rectangle_and_centers(rectangle, points, optimal_centers)
+                self.plot_rectangle_and_centers(rect, points, optimal_centers)
+
+
+        elif method == "BilinearGrid":
+            result = self.build_bilinear_grid(
+                x_min, x_max, y_min, y_max,
+                grid_cell_size=grid_cell_size,
+                k=k
+            )
+            if result is None:
+                return None
+
+            probe_points, xs, ys, dx, dy = result
+            optimal_centers = probe_points
+            self.surf_align_probe_points = optimal_centers
+
+            if show_plot:
+                self.plot_bilinear_grid(
+                    x_min, x_max,
+                    y_min, y_max,
+                    probe_points,
+                    points=points
+                )
+
+        else:
+            print(f"❌ Unknown probing method: {method}")
+            return None
 
         return optimal_centers

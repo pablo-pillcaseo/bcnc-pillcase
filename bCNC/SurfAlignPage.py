@@ -1552,17 +1552,44 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.mp_z_max = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.mp_z_max.grid(row=row, column=col, sticky=EW)
 
-        row += 1;
+        row += 1
         col = 0
         Label(frame, text=_("Probe Coverage Method")).grid(row=row, column=col, sticky=E)
         col += 1
-        self.probe_coverage_methods = ["EvenCoverage", "AreaCoverage"]
-        self.probe_coverage_method = tkExtra.Combobox(frame, True, background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
-                                                      width=16)
+
+        self.probe_coverage_methods = ["EvenCoverage", "AreaCoverage", "BilinearGrid"]
+
+        self.probe_coverage_method_var = tk.StringVar()
+        self.probe_coverage_method = ttk.Combobox(
+            frame,
+            textvariable=self.probe_coverage_method_var,
+            values=self.probe_coverage_methods,
+            width=16,
+            state="readonly"
+        )
         self.probe_coverage_method.grid(row=row, column=col, sticky=EW)
-        self.probe_coverage_method.fill(self.probe_coverage_methods)
-        self.probe_coverage_method.set("EvenCoverage")
+        self.probe_coverage_method_var.set("EvenCoverage")
+
+        # Binding that **always** works
+        self.probe_coverage_method.bind("<<ComboboxSelected>>", self._on_probe_method_change)
+
+        # Register to disable during run
         self.addWidget(self.probe_coverage_method)
+
+        row += 1
+        col = 0
+        self.bilin_grid_cell_label = Label(frame, text=_("Cell ~Size (mm):"))
+        self.bilin_grid_cell_label.grid(row=row, column=col, sticky=E)
+
+        col += 1
+        self.bilin_grid_cell_size_mm = tkExtra.FloatEntry(
+            frame, 
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.bilin_grid_cell_size_mm.set(5.0)  # Set a default value, e.g., 5.0 mm
+        self.bilin_grid_cell_size_mm.grid(row=row, column=col, sticky=EW)
+        tkExtra.Balloon.set(self.bilin_grid_cell_size_mm, _("Approx desired bilinear grid cell size"))
+        self.addWidget(self.bilin_grid_cell_size_mm)
 
         row += 1;
         col = 0
@@ -1671,6 +1698,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.mp_z_min.set(Utils.getFloat("SurfAlign", "mp_z_min"))
         self.mp_z_max.set(Utils.getFloat("SurfAlign", "mp_z_max"))
         self.n_probe_points.set(Utils.getInt("SurfAlign", "n_probe_points"))
+        self.probe_coverage_method.set(Utils.getStr("SurfAlign", "probe_coverage_method"))
+        self.bilin_grid_cell_size_mm.set(Utils.getFloat("SurfAlign", "bilin_grid_cell_size_mm"))
         self.x_probe_to_tool_offset.set(Utils.getFloat("SurfAlign", "x_probe_to_tool_offset"))
         self.y_probe_to_tool_offset.set(Utils.getFloat("SurfAlign", "y_probe_to_tool_offset"))
         self.z_probe_to_tool_offset.set(Utils.getFloat("SurfAlign", "z_probe_to_tool_offset"))
@@ -1678,17 +1707,39 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.step_size.set(Utils.getFloat("SurfAlign", "step_size"))
         self.polynomial_degree.set(Utils.getInt("SurfAlign", "polynomial_degree"))
         self.update_validation_status()
+        self._on_probe_method_change()
 
     def saveConfig(self):
         Utils.setFloat("SurfAlign", "mp_z_min", self.mp_z_min.get())
         Utils.setFloat("SurfAlign", "mp_z_max", self.mp_z_max.get())
         Utils.setInt("SurfAlign", "n_probe_points", self.n_probe_points.get())
+        Utils.setStr("SurfAlign", "probe_coverage_method", self.probe_coverage_method.get())
+        Utils.setFloat("SurfAlign", "bilin_grid_cell_size_mm", self.bilin_grid_cell_size_mm.get())
         Utils.setFloat("SurfAlign", "x_probe_to_tool_offset", self.x_probe_to_tool_offset.get())
         Utils.setFloat("SurfAlign", "y_probe_to_tool_offset", self.y_probe_to_tool_offset.get())
         Utils.setFloat("SurfAlign", "z_probe_to_tool_offset", self.z_probe_to_tool_offset.get())
         Utils.setFloat("SurfAlign", "z_safety_limit", self.z_safety_limit.get())
         Utils.setFloat("SurfAlign", "step_size", self.step_size.get())
         Utils.setInt("SurfAlign", "polynomial_degree", self.polynomial_degree.get())
+        
+    def _on_probe_method_change(self, event=None):
+        """Show/hide bilinear grid cell size widgets based on method."""
+        method = self.probe_coverage_method_var.get()
+
+        # Show/hide grid widgets
+        bilin_widgets = [
+            self.bilin_grid_cell_label,
+            self.bilin_grid_cell_size_mm,
+        ]
+
+        # If BilinearGrid → show these widgets
+        if method == "BilinearGrid":
+            for w in bilin_widgets:
+                w.grid()    # restore previous grid position
+        else:
+            for w in bilin_widgets:
+                w.grid_remove()   # hide cleanly
+
 
     # ------------------ Your existing logic, with minor tweaks ------------------
     def surface_align_gcode(self):
@@ -1778,8 +1829,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
+        try:
+            bilin_grid_cell_size_mm = float(self.bilin_grid_cell_size_mm.get())
+        except:
+            bilin_grid_cell_size_mm = None
         self.probe_points = self.app.gcode.generate_and_plot_probing_points(
-            method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot)
+            method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot, grid_cell_size=bilin_grid_cell_size_mm)
 
         print("self.probe_points", self.probe_points)
         return self._has_points()  # <-- instead of bool(self.probe_points)
