@@ -1756,7 +1756,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         bounds = self.app.gcode.surf_align_gcode(self.app.editor.getSelectedBlocks(),
                                                  step_size=float(self.step_size.get()),
-                                                 degree=polynomial_degree)
+                                                 degree=polynomial_degree,
+                                                 method=self.probe_coverage_method.get())
         self.app.drawAfter()
 
     def validate_probe_points_vs_degree(self, num_points, degree):
@@ -1971,7 +1972,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         polynomial_degree = int(self.polynomial_degree.get())
         bounds = self.app.gcode.surf_align_gcode(self.app.editor.getAllBlocks(),
                                                  step_size=float(self.step_size.get()),
-                                                 degree=polynomial_degree)
+                                                 degree=polynomial_degree,
+                                                 method=self.probe_coverage_method.get())
         self.app.drawAfter()
         print("Bounds:", bounds)
         print("SURF ALIGN GCODE COMPLETED")

@@ -3781,6 +3781,150 @@ class GCode:
         if undoinfo:
             self.addUndo(undoinfo)
 
+
+    # ----------------------------------------------------------------------
+    # Bilinear grid helpers (for Multi-Point Surf Align)
+    # ----------------------------------------------------------------------
+    def _build_bilinear_grid_from_points(self, points, tol=1e-6):
+        """
+        Build a regular X–Y grid and Z matrix from self.probe.multi_probe_points.
+        Expects points ~on a rectilinear grid (BilinearGrid mode).
+        Returns (grid_x, grid_y, Zgrid) or None on failure.
+        """
+        import numpy as np
+
+        try:
+            pts = np.array(points, dtype=float)
+        except Exception:
+            print("❌ Could not convert probe points to numpy array")
+            return None
+
+        if pts.ndim != 2 or pts.shape[1] < 3:
+            print("❌ multi_probe_points must be Nx3 (x,y,z)")
+            return None
+
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        zs = pts[:, 2]
+
+        # Reduce floating noise so unique() makes a clean grid
+        rx = np.round(xs, 6)
+        ry = np.round(ys, 6)
+
+        grid_x = np.unique(rx)
+        grid_y = np.unique(ry)
+
+        nx = grid_x.size
+        ny = grid_y.size
+
+        if nx < 2 or ny < 2:
+            print("❌ Need at least a 2x2 grid of points for bilinear interpolation")
+            return None
+
+        # Build Z grid: rows = Y, cols = X
+        Z = np.full((ny, nx), np.nan, dtype=float)
+
+        for x, y, z in zip(rx, ry, zs):
+            ix = np.where(np.abs(grid_x - x) < tol)[0]
+            iy = np.where(np.abs(grid_y - y) < tol)[0]
+            if ix.size == 0 or iy.size == 0:
+                continue
+            Z[iy[0], ix[0]] = z
+
+        if np.isnan(Z).any():
+            print("⚠ Bilinear grid has missing cells (NaN). "
+                  "Interpolation near gaps may be inaccurate.")
+
+        return grid_x, grid_y, Z
+
+
+
+    def _bilinear_interpolate_z(self, x, y, grid_x, grid_y, Z):
+        """
+        Bilinear interpolation on a rectilinear grid.
+        grid_x: 1D array of Xs (ascending)
+        grid_y: 1D array of Ys (ascending)
+        Z:      2D array, shape (len(grid_y), len(grid_x))
+        Returns interpolated Z, or None if impossible.
+        """
+        import numpy as np
+
+        gx = grid_x
+        gy = grid_y
+
+        # Clamp to grid bounds (outside area uses nearest cell)
+        if x <= gx[0]:
+            ix0 = ix1 = 0
+        elif x >= gx[-1]:
+            ix0 = ix1 = len(gx) - 1
+        else:
+            ix1 = int(np.searchsorted(gx, x))
+            ix0 = ix1 - 1
+
+        if y <= gy[0]:
+            iy0 = iy1 = 0
+        elif y >= gy[-1]:
+            iy0 = iy1 = len(gy) - 1
+        else:
+            iy1 = int(np.searchsorted(gy, y))
+            iy0 = iy1 - 1
+
+        x0, x1 = gx[ix0], gx[ix1]
+        y0, y1 = gy[iy0], gy[iy1]
+
+        z00 = Z[iy0, ix0]
+        z10 = Z[iy0, ix1]
+        z01 = Z[iy1, ix0]
+        z11 = Z[iy1, ix1]
+
+        # If all four are NaN, we cannot interpolate
+        if all(np.isnan(v) for v in (z00, z10, z01, z11)):
+            return None
+
+        # Degenerate cases (exactly on a node or line)
+        if ix0 == ix1 and iy0 == iy1:
+            return z00
+        if x1 == x0:
+            # vertical line → linear in Y
+            if np.isnan(z00) and not np.isnan(z01):
+                return z01
+            if np.isnan(z01) and not np.isnan(z00):
+                return z00
+            t = 0.0 if y1 == y0 else (y - y0) / (y1 - y0)
+            return (1.0 - t) * z00 + t * z01
+        if y1 == y0:
+            # horizontal line → linear in X
+            if np.isnan(z00) and not np.isnan(z10):
+                return z10
+            if np.isnan(z10) and not np.isnan(z00):
+                return z00
+            t = 0.0 if x1 == x0 else (x - x0) / (x1 - x0)
+            return (1.0 - t) * z00 + t * z10
+
+        # Normal bilinear case
+        tx = (x - x0) / (x1 - x0)
+        ty = (y - y0) / (y1 - y0)
+
+        # If some corners are NaN, fall back to nearest available
+        if np.isnan(z00) or np.isnan(z10) or np.isnan(z01) or np.isnan(z11):
+            candidates = []
+            for vx, vy, vz in ((x0, y0, z00), (x1, y0, z10),
+                               (x0, y1, z01), (x1, y1, z11)):
+                if not np.isnan(vz):
+                    d2 = (x - vx) ** 2 + (y - vy) ** 2
+                    candidates.append((d2, vz))
+            if not candidates:
+                return None
+            return min(candidates, key=lambda t: t[0])[1]
+
+        # Full bilinear formula
+        z0 = z00 * (1.0 - tx) + z10 * tx
+        z1 = z01 * (1.0 - tx) + z11 * tx
+        z = z0 * (1.0 - ty) + z1 * ty
+        return z
+
+
+
     # ----------------------------------------------------------------------
     # Fit G-Code
     # ----------------------------------------------------------------------
@@ -3806,14 +3950,29 @@ class GCode:
         coeffs, *_ = np.linalg.lstsq(A, Z, rcond=None)  # least squares solution
         return coeffs
 
-    def surf_align_block(self, block, poly_plane_coeffs, poly_plane_degree, step_size=1):
+    def surf_align_block(
+            self,
+            block,
+            step_size=1.0,
+            mode="poly",
+            poly_plane_coeffs=None,
+            poly_plane_degree=None,
+            grid_x=None,
+            grid_y=None,
+            Zgrid=None,
+        ):
+        """
+        Surface-align a single block.
+
+        mode = "poly"     → use polynomial surface (self.probe.splitLine_surf_align)
+        mode = "bilinear" → use bilinear interpolation on (grid_x, grid_y, Zgrid)
+        """
         z_probe_offset = self.z_probe_to_tool_offset
         new = []
 
         all_x, all_y, all_z = [], [], []
-
-        # is_multi_point_probe = not self.probe.multi_point_probe.is_empty()
         is_multi_point_probe = True
+
         for line in block:
             cmds = CNC.compileLine(line)
             if cmds is None:
@@ -3840,29 +3999,80 @@ class GCode:
                                 ("G", "X", "Y", "Z", "I", "J", "K", "R")):
                             extra += c
                     x1, y1, z1 = xyz[0]
-                    if self.cnc.gcode == 0:
-                        g = 0
-                    else:
-                        g = 1
+                    g = 0 if self.cnc.gcode == 0 else 1
+
                     for x2, y2, z2 in xyz[1:]:
-                        for x, y, z in self.probe.splitLine_surf_align(x1, y1, z1, x2,
-                                                                       y2, z2, poly_plane_coeffs, poly_plane_degree,
-                                                                       step_size=step_size):
-                            z -= z_probe_offset
-                            new.append(
-                                "".join([
-                                    f"G{int(g)}",
-                                    f"{self.fmt(' X', x / self.cnc.unit)}",
-                                    f"{self.fmt(' Y', y / self.cnc.unit)}",
-                                    f"{self.fmt(' Z', z / self.cnc.unit)}",
-                                    extra,
-                                ])
-                            )
-                            all_x.append(x)
-                            all_y.append(y)
-                            all_z.append(z)
-                            extra = ""
+                        if mode == "poly":
+                            for x, y, z in self.probe.splitLine_surf_align(
+                                    x1, y1, z1,
+                                    x2, y2, z2,
+                                    poly_plane_coeffs,
+                                    poly_plane_degree,
+                                    step_size=step_size,
+                            ):
+                                z -= z_probe_offset
+                                new.append(
+                                    "".join([
+                                        f"G{int(g)}",
+                                        f"{self.fmt(' X', x / self.cnc.unit)}",
+                                        f"{self.fmt(' Y', y / self.cnc.unit)}",
+                                        f"{self.fmt(' Z', z / self.cnc.unit)}",
+                                        extra,
+                                    ])
+                                )
+                                all_x.append(x)
+                                all_y.append(y)
+                                all_z.append(z)
+                                extra = ""
+
+                        elif mode == "bilinear":
+                            dx, dy, dz = x2 - x1, y2 - y1, z2 - z1
+                            dist_xy = math.hypot(dx, dy)
+                            if step_size is None or step_size <= 0:
+                                n_steps = 1
+                            else:
+                                n_steps = max(1, int(math.ceil(dist_xy / step_size)))
+
+                            for i in range(1, n_steps + 1):
+                                t = i / float(n_steps)
+                                x = x1 + dx * t
+                                y = y1 + dy * t
+                                orig_z = z1 + dz * t
+
+                                surf_z = self._bilinear_interpolate_z(
+                                    x, y, grid_x, grid_y, Zgrid
+                                )
+                                if surf_z is None:
+                                    # Fallback: no correction, just use original Z
+                                    z = orig_z
+                                else:
+                                    # Treat surf_z as correction term (same as before)
+                                    z = orig_z + surf_z
+
+                                # Apply probe→tool Z offset
+                                z -= z_probe_offset
+
+                                new.append(
+                                    "".join([
+                                        f"G{int(g)}",
+                                        f"{self.fmt(' X', x / self.cnc.unit)}",
+                                        f"{self.fmt(' Y', y / self.cnc.unit)}",
+                                        f"{self.fmt(' Z', z / self.cnc.unit)}",
+                                        extra,
+                                    ])
+                                )
+                                all_x.append(x)
+                                all_y.append(y)
+                                all_z.append(z)
+                                extra = ""
+
+                        else:
+                            # Unknown mode → just pass through original toolpath (no correction)
+                            # You could also raise an exception here if you prefer.
+                            pass
+
                         x1, y1, z1 = x2, y2, z2
+
                 self.cnc.motionEnd()
             else:
                 self.cnc.motionEnd()
@@ -3880,44 +4090,113 @@ class GCode:
 
         return new, bounds
 
-    def surf_align_gcode(self, items, step_size=1, degree=1):
+    def surf_align_gcode(self, items, step_size=1, degree=1, method=None):
+        """
+        Surface-align G-code using either:
+          - Polynomial fit (default / EvenCoverage / AreaCoverage)
+          - Bilinear interpolation (when method == 'BilinearGrid')
+
+        Probe points are taken from self.probe.multi_probe_points.
+        """
         print("Surf Align G-Code")
 
         # self.probe.multi_probe_points = [[-3.861, 18.207, 0], [4.7, -22.876, -1], [-4.7, -3.686, 0],
         #                                  [4.701, 7.0, -3], [4.701, -11, 2],  [5.701, -12, 2.01]]  # TODO: Remove this, test probe points
 
-        if self.probe.multi_probe_points is None or len(self.probe.multi_probe_points) < self.probe.no_of_points:
+        points = self.probe.multi_probe_points
+        if points is None or len(points) < self.probe.no_of_points:
             print("No Multi-Point Probe Points, or not enough points")
+            messagebox.showerror(
+                _("Probe Error"),
+                _("No multi-point probe data available, or not enough probe points collected.\n\n"
+                  "➡  Click  Start Probing  to collect probe points before running Surface Align.")
+            )
             return None
 
-        poly_plane_coeffs = self.fit_polynomial_surface_numpy(self.probe.multi_probe_points, degree=degree)
-        if poly_plane_coeffs is None:
-            print("❌ Polynomial fitting failed. Aborting surface align.")
-            return None
-        print("Poly Plane Coeffs: ", poly_plane_coeffs, "degree: ", degree)
+        # Decide mode
+        use_bilinear = (
+            method is not None
+            and isinstance(method, str)
+            and method.lower() == "bilineargrid".lower()
+        )
+
         undoinfo = []
-        operation = "surf_align"
-
-        # Initialize total min/max values
         total_bounds = {
             "x_min": float("inf"), "x_max": float("-inf"),
             "y_min": float("inf"), "y_max": float("-inf"),
             "z_min": float("inf"), "z_max": float("-inf")
         }
 
-        for bid in items:
-            block = self.blocks[bid]
-            if block.name() in ("Header", "Footer"):
-                continue
-            lines, bounds = self.surf_align_block(block, poly_plane_coeffs, poly_plane_degree=degree, step_size=step_size)
-            undoinfo.append(self.addBlockOperationUndo(bid, operation))
-            undoinfo.append(self.setBlockLinesUndo(bid, lines))
+        if use_bilinear:
+            print("➡ Using BilinearGrid surf align")
+            grid = self._build_bilinear_grid_from_points(points)
+            if grid is None:
+                print("❌ Failed to build bilinear grid. Aborting surface align.")
+                return None
 
-            # Update total bounds
-            for axis in ["x", "y", "z"]:
-                if bounds[f"{axis}_min"] is not None:
-                    total_bounds[f"{axis}_min"] = min(total_bounds[f"{axis}_min"], bounds[f"{axis}_min"])
-                    total_bounds[f"{axis}_max"] = max(total_bounds[f"{axis}_max"], bounds[f"{axis}_max"])
+            grid_x, grid_y, Zgrid = grid
+            operation = "surf_align_bilinear"
+
+            for bid in items:
+                block = self.blocks[bid]
+                if block.name() in ("Header", "Footer"):
+                    continue
+
+                lines, bounds = self.surf_align_block(
+                    block,
+                    step_size=step_size,
+                    mode="bilinear",
+                    grid_x=grid_x,
+                    grid_y=grid_y,
+                    Zgrid=Zgrid,
+                )
+                undoinfo.append(self.addBlockOperationUndo(bid, operation))
+                undoinfo.append(self.setBlockLinesUndo(bid, lines))
+
+                # Update total bounds
+                for axis in ("x", "y", "z"):
+                    if bounds[f"{axis}_min"] is not None:
+                        total_bounds[f"{axis}_min"] = min(
+                            total_bounds[f"{axis}_min"], bounds[f"{axis}_min"]
+                        )
+                        total_bounds[f"{axis}_max"] = max(
+                            total_bounds[f"{axis}_max"], bounds[f"{axis}_max"]
+                        )
+
+        else:
+            print("➡ Using Polynomial surf align, degree =", degree)
+            poly_plane_coeffs = self.fit_polynomial_surface_numpy(points, degree=degree)
+            if poly_plane_coeffs is None:
+                print("❌ Polynomial fitting failed. Aborting surface align.")
+                return None
+
+            print("Poly Plane Coeffs: ", poly_plane_coeffs, "degree: ", degree)
+            operation = "surf_align"
+
+            for bid in items:
+                block = self.blocks[bid]
+                if block.name() in ("Header", "Footer"):
+                    continue
+
+                lines, bounds = self.surf_align_block(
+                    block,
+                    step_size=step_size,
+                    mode="poly",
+                    poly_plane_coeffs=poly_plane_coeffs,
+                    poly_plane_degree=degree,
+                )
+                undoinfo.append(self.addBlockOperationUndo(bid, operation))
+                undoinfo.append(self.setBlockLinesUndo(bid, lines))
+
+                # Update total bounds
+                for axis in ("x", "y", "z"):
+                    if bounds[f"{axis}_min"] is not None:
+                        total_bounds[f"{axis}_min"] = min(
+                            total_bounds[f"{axis}_min"], bounds[f"{axis}_min"]
+                        )
+                        total_bounds[f"{axis}_max"] = max(
+                            total_bounds[f"{axis}_max"], bounds[f"{axis}_max"]
+                        )
 
         if undoinfo:
             self.addUndo(undoinfo)
