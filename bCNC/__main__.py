@@ -53,6 +53,12 @@ def main():
     except ImportError:
         serial = None
         print("testing mode, could not import serial")
+    
+    # Check for MSVC v143 and install if needed
+    import install_msvc as msvc_check
+    if not msvc_check.ensure_msvc_v143():
+        print("⚠ MSVC v143 check failed. Application may not function correctly.")
+        # sys.exit(1)
 
     # Parse arguments
     try:
