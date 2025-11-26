@@ -275,6 +275,7 @@ def setup_blender_scene(engrave_text, font_path, text_font_size, text_position_m
         camop.spindle_rpm = spindle_rpm
         camop.output_trailer = True
         camop.gcode_trailer = f"G00 X0Y0Z{final_height_mm}"
+        camop.first_down = True
 
         bpy.ops.object.calculate_cam_path()
 

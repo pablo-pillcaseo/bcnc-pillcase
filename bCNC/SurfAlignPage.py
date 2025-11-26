@@ -1536,13 +1536,16 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         frame = lframe.frame
 
         row, col = 0, 0
-        Label(frame, text=_("No. of Points:")).grid(row=row, column=col, sticky=E)
+        # 👇 keep a reference to the label so we can hide/show it later
+        self.n_probe_points_label = Label(frame, text=_("No. of Points:"))
+        self.n_probe_points_label.grid(row=row, column=col, sticky=E)
+
         col += 1
         self.n_probe_points = tkExtra.IntegerEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.n_probe_points.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.n_probe_points, _("Number of probe points"))
 
-        row += 1;
+        row += 1
         col = 0
         Label(frame, text=_("Z Min, Max:")).grid(row=row, column=col, sticky=E)
         col += 1
@@ -1603,21 +1606,31 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.z_probe_to_tool_offset = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND);
         self.z_probe_to_tool_offset.grid(row=row, column=2, sticky=EW)
 
-        row += 1;
+        row += 1
         col = 0
         Label(frame, text=_("Step Size:")).grid(row=row, column=col, sticky=E)
         col += 1
         self.step_size = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.step_size.grid(row=row, column=col, sticky=EW)
 
-        row += 1;
+        tkExtra.Balloon.set(
+            self.step_size,
+            _("Maximum XY distance between surface correction points.\n"
+              "Smaller = smoother following of the surface (more points).\n"
+              "Larger = fewer points, faster but less accurate.")
+        )
+
+        row += 1
         col = 0
-        Label(frame, text=_("Poly Degree:")).grid(row=row, column=col, sticky=E)
+        self.polynomial_degree_label = Label(frame, text=_("Poly Degree:"))
+        self.polynomial_degree_label.grid(row=row, column=col, sticky=E)
         col += 1
-        self.polynomial_degree = tkExtra.IntegerEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
+        self.polynomial_degree = tkExtra.IntegerEntry(
+            frame,
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.polynomial_degree.grid(row=row, column=col, sticky=EW)
 
-        row += 1;
+        row += 1
         col = 0
         self.validation_status = Label(frame, text="", fg="gray", font=("TkDefaultFont", 8))
         self.validation_status.grid(row=row, column=col, columnspan=3, sticky=W)
@@ -1692,6 +1705,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         frame.grid_columnconfigure(1, weight=1)
         self.loadConfig()
+        self._on_probe_method_change()
 
     # ------------------ Config (unchanged) ------------------
     def loadConfig(self):
@@ -1723,22 +1737,36 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Utils.setInt("SurfAlign", "polynomial_degree", self.polynomial_degree.get())
         
     def _on_probe_method_change(self, event=None):
-        """Show/hide bilinear grid cell size widgets based on method."""
+        """Show/hide widgets depending on selected probe coverage method."""
         method = self.probe_coverage_method_var.get()
 
-        # Show/hide grid widgets
+        # Bilinear grid widgets (only for BilinearGrid)
         bilin_widgets = [
             self.bilin_grid_cell_label,
             self.bilin_grid_cell_size_mm,
         ]
 
-        # If BilinearGrid → show these widgets
+        # Widgets used for polynomial-based methods (EvenCoverage / AreaCoverage)
+        poly_widgets = [
+            self.n_probe_points_label,
+            self.n_probe_points,
+            self.validation_status,
+            self.polynomial_degree_label,
+            self.polynomial_degree,
+        ]
+
         if method == "BilinearGrid":
+            # 👉 Bilinear: show grid cell size, hide No. of Points + Poly Degree
             for w in bilin_widgets:
-                w.grid()    # restore previous grid position
+                w.grid()          # restore previous grid position
+            for w in poly_widgets:
+                w.grid_remove()   # hide
         else:
+            # 👉 Other methods: show No. of Points + Poly Degree, hide bilinear stuff
             for w in bilin_widgets:
-                w.grid_remove()   # hide cleanly
+                w.grid_remove()
+            for w in poly_widgets:
+                w.grid()
 
 
     # ------------------ Your existing logic, with minor tweaks ------------------
@@ -1835,7 +1863,10 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         except:
             bilin_grid_cell_size_mm = None
         self.probe_points = self.app.gcode.generate_and_plot_probing_points(
-            method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot, grid_cell_size=bilin_grid_cell_size_mm)
+            method=self.probe_coverage_method.get(), k=no_of_points, show_plot=show_plot,
+            grid_cell_size=bilin_grid_cell_size_mm,
+            step_size=float(self.step_size.get() or 1.0)
+        )
 
         print("self.probe_points", self.probe_points)
         return self._has_points()  # <-- instead of bool(self.probe_points)

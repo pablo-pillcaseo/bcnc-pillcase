@@ -29,6 +29,7 @@ from bstl import Binary_STL_Writer
 from dxf import DXF
 from svgcode import SVGcode
 from Helpers import to_zip
+from python_tsp.heuristics import solve_tsp_local_search
 
 IDPAT = re.compile(r".*\bid:\s*(.*?)\)")
 PARENPAT = re.compile(r"(\(.*?\))")
@@ -5919,8 +5920,7 @@ class GCode:
 
         plt.show()
 
-    def make_cutting_points(self):
-
+    def make_cutting_points(self, step_size = 1.0):
         x_coords = []
         y_coords = []
         z_coords = []
@@ -5945,7 +5945,7 @@ class GCode:
                         continue
                     x1, y1, z1 = xyz[0]
                     for x2, y2, z2 in xyz[1:]:
-                        segments = self.probe.make_line_segments(x1, y1, z1, x2, y2, z2, 1)
+                        segments = self.probe.make_line_segments(x1, y1, z1, x2, y2, z2, step_size)
                         for x, y, z in segments:
                             x_coords.append(x)
                             y_coords.append(y)
@@ -6064,12 +6064,28 @@ class GCode:
 
     def plot_results_by_points(self, points, best_centers):
         fig, ax = plt.subplots()
-        ax.scatter(points[:, 0], points[:, 1], color='blue', alpha=0.5, s=3, label="Points")
-        ax.scatter(best_centers[:, 0], best_centers[:, 1], color='red', marker='x', s=15, label="Selected Centers")
+        ax.scatter(points[:, 0], points[:, 1],
+                   color='blue', alpha=0.5, s=3, label="Points")
+        ax.scatter(best_centers[:, 0], best_centers[:, 1],
+                   color='red', marker='x', s=15, label="Selected Centers")
+
+        # Draw coverage circles
         max_radius = max(np.min(distance_matrix(best_centers, points), axis=0))
         for center in best_centers:
             circle = plt.Circle(center, max_radius, color='black', fill=False, linestyle='dashed')
             ax.add_patch(circle)
+
+        # 🟢 Add index labels
+        for i, (x, y) in enumerate(best_centers):
+            ax.text(
+                x, y,
+                str(i + 1),
+                fontsize=8,
+                color="darkorange",
+                ha="left", va="bottom",
+                alpha=0.8,
+            )
+
         ax.set_xlabel("X Axis")
         ax.set_ylabel("Y Axis")
         ax.set_aspect('equal', adjustable='box')
@@ -6089,6 +6105,18 @@ class GCode:
         for center in optimal_centers:
             circle = plt.Circle(center, max_radius, color='green', fill=False, linestyle='dashed')
             ax.add_patch(circle)
+
+        # 🟢 Add index labels
+        for i, (x, y) in enumerate(optimal_centers):
+            ax.text(
+                x, y,
+                str(i + 1),
+                fontsize=8,
+                color="darkorange",
+                ha="left", va="bottom",
+                alpha=0.8,
+            )
+
         ax.set_xlabel("X Axis")
         ax.set_ylabel("Y Axis")
         ax.set_aspect('equal', adjustable='box')
@@ -6120,6 +6148,17 @@ class GCode:
         ax.scatter(probe_points[:, 0], probe_points[:, 1],
                    s=20, color="red", marker="x", label="Probe Points")
 
+        # 🟢 Add index labels to each probe point
+        for i, (x, y) in enumerate(probe_points):
+            ax.text(
+                x, y,
+                str(i + 1),  # 1-based index
+                fontsize=8,
+                color="darkorange",
+                ha="left", va="bottom",
+                alpha=0.8,
+            )
+
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
@@ -6127,23 +6166,90 @@ class GCode:
         ax.set_title("Bilinear Grid Probing Points")
         plt.show()
 
+    def _order_probe_points_min_path(self, probe_points, ref_point):
+        """
+        Reorder probe_points to follow a short path in XY, ending at
+        the point closest to ref_point.
+
+        probe_points: Nx2 array-like of (x, y)
+        ref_point: (x, y) of G-code reference point (e.g. first cutting point)
+        """
+        import numpy as np
+
+        pts = np.array(probe_points, dtype=float)
+        n = pts.shape[0]
+        if n <= 1:
+            return pts
+
+        ref = np.array(ref_point, dtype=float)
+
+        # 1️⃣ Choose endpoint: point closest to the reference G-code point
+        d_ref = np.linalg.norm(pts - ref, axis=1)
+        end_idx = int(np.argmin(d_ref))
+
+        # 2️⃣ Build a greedy nearest-neighbour path through remaining points
+        remaining = [i for i in range(n) if i != end_idx]
+        if not remaining:
+            return pts[[end_idx]]
+
+        # Start from the point farthest from ref (tends to sweep the area)
+        start_idx = max(remaining, key=lambda i: np.linalg.norm(pts[i] - ref))
+        path = [start_idx]
+        remaining.remove(start_idx)
+
+        while remaining:
+            last = path[-1]
+            next_idx = min(
+                remaining,
+                key=lambda i: np.linalg.norm(pts[i] - pts[last])
+            )
+            path.append(next_idx)
+            remaining.remove(next_idx)
+
+        # 3️⃣ End at the point closest to the G-code reference
+        path.append(end_idx)
+
+        ordered = pts[path]
+        return ordered
+
+    def shortest_probe_path_fast(self, probe_points, ref_point):
+        pts = np.array(probe_points, dtype=float)
+        n = len(pts)
+
+        # find closest point to end at
+        ref = np.array(ref_point, dtype=float)
+        end_idx = int(np.argmin(np.linalg.norm(pts - ref, axis=1)))
+
+        # distance matrix
+        D = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+
+        # solve using fast heuristic
+        permutation, distance = solve_tsp_local_search(D)
+
+        # rotate so path ends at ref point
+        end_pos = permutation.index(end_idx)
+        ordered = permutation[end_pos + 1:] + permutation[:end_pos + 1]
+
+        return pts[ordered], distance
 
     def generate_and_plot_probing_points(
             self,
             method="EvenCoverage",
             k=5,
             show_plot=False,
-            grid_cell_size=None
+            grid_cell_size=None,
+            step_size=1.0
     ):
         print("Generating Probing Points")
 
         # -----------------------------
         # Get cutting points from G-code
         # -----------------------------
-        x_coords, y_coords, z_coords = self.make_cutting_points()
+        x_coords, y_coords, z_coords = self.make_cutting_points(step_size)
         if len(x_coords) == 0 or len(y_coords) == 0:
-            messagebox.showwarning(_("Probe error"), _("No cutting points found"))
+            messagebox.showwarning("Probe error", "No cutting points found")
             return None
+
         x_min, x_max = np.min(x_coords), np.max(x_coords)
         y_min, y_max = np.min(y_coords), np.max(y_coords)
         points = np.column_stack((x_coords, y_coords))
@@ -6152,20 +6258,12 @@ class GCode:
 
         if method == "EvenCoverage":
             optimal_centers = self.min_max_distance_k_centers_by_points(points, k)
-            self.surf_align_probe_points = optimal_centers
-            # Call the new plotting function
-            if show_plot:
-                self.plot_results_by_points(points, optimal_centers)
 
         elif method == "AreaCoverage":
             rect = (x_min, y_min, x_max, y_max)
             optimal_centers = self.find_optimal_centers_by_rectangle(
                 rect, points, k
             )
-            self.surf_align_probe_points = optimal_centers
-            if show_plot:
-                self.plot_rectangle_and_centers(rect, points, optimal_centers)
-
 
         elif method == "BilinearGrid":
             result = self.build_bilinear_grid(
@@ -6178,18 +6276,50 @@ class GCode:
 
             probe_points, xs, ys, dx, dy = result
             optimal_centers = probe_points
-            self.surf_align_probe_points = optimal_centers
-
-            if show_plot:
-                self.plot_bilinear_grid(
-                    x_min, x_max,
-                    y_min, y_max,
-                    probe_points,
-                    points=points
-                )
 
         else:
             print(f"❌ Unknown probing method: {method}")
             return None
 
-        return optimal_centers
+        if optimal_centers is None or len(optimal_centers) == 0:
+            print("❌ No probe centers generated")
+            return None
+
+        gcode_ref_point = (x_coords[0], y_coords[0])
+
+        if len(optimal_centers) > 40:
+            # ⚡ FAST but approximate greedy path
+            ordered_centers = self._order_probe_points_min_path(
+                optimal_centers,
+                gcode_ref_point
+            )
+        else:
+            # 🎯 BETTER quality path using TSP local search
+            ordered_centers, _ = self.shortest_probe_path_fast(
+                optimal_centers,
+                gcode_ref_point
+            )
+
+        # Always ensure numpy array Nx2
+        ordered_centers = np.array(ordered_centers, dtype=float)
+
+        # Save final ordered path
+        self.surf_align_probe_points = ordered_centers
+
+        if show_plot:
+            if method == "EvenCoverage":
+                self.plot_results_by_points(points, ordered_centers)
+
+            elif method == "AreaCoverage":
+                rect = (x_min, y_min, x_max, y_max)
+                self.plot_rectangle_and_centers(rect, points, ordered_centers)
+
+            elif method == "BilinearGrid":
+                self.plot_bilinear_grid(
+                    x_min, x_max,
+                    y_min, y_max,
+                    ordered_centers,
+                    points=points
+                )
+
+        return ordered_centers
