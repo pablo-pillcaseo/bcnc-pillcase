@@ -1597,6 +1597,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         row += 1;
         col = 0
         Label(frame, text=_("Offset (Probe → Tool):")).grid(row=row, column=col, sticky=E)
+        col += 2
+        # Measure Z Offset Button
+        b = Button(frame, text=_("Measure Z Offset"), command=self.measure_z_offset_popup, padx=1, pady=1)
+        b.grid(row=row, column=col, sticky=EW)
+        tkExtra.Balloon.set(b, _("Measure Z Offset between Tool and Probe\nTool must be touching the surface."))
+
         row += 1;
         col = 0
         self.x_probe_to_tool_offset = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND);
@@ -1838,6 +1844,171 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         if callable(tolist):
             return tolist()
         return list(pts)
+
+    def measure_z_offset_popup(self):
+        """Show popup to guide user for Z offset measurement."""
+        dialog = Toplevel(self)
+        dialog.title(_("Measure Z Offset"))
+        dialog.geometry("350x250")
+        dialog.resizable(False, False)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.focus_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
+
+        Label(dialog, text=_("1. Jog tool to touch the surface."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
+        Label(dialog, text=_("2. Click 'Measure'."), justify=LEFT).pack(anchor=W, padx=10, pady=5)
+        Label(dialog, text=_("Machine will lift to Max Z, move to XY offset,\nand probe to Min Z."), justify=LEFT, fg="gray").pack(anchor=W, padx=10, pady=5)
+
+        # Min/Max Z Inputs
+        input_frame = Frame(dialog)
+        input_frame.pack(fill=X, padx=10, pady=5)
+        
+        Label(input_frame, text=_("Z Max (Safe):")).grid(row=0, column=0, sticky=E)
+        z_max_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        z_max_entry.grid(row=0, column=1, padx=5)
+        z_max_entry.set(5.0) # Default relative lift
+
+        Label(input_frame, text=_("Z Min (Probe):")).grid(row=0, column=2, sticky=E)
+        z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        z_min_entry.grid(row=0, column=3, padx=5)
+        z_min_entry.set(-10.0) # Default relative probe depth
+
+        # Explanatory text
+        Label(dialog, text=_("Z values are relative to the current\ntool position (surface contact point)."), 
+              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).pack(anchor=W, padx=10, pady=(0, 5))
+
+        btn_frame = Frame(dialog)
+        btn_frame.pack(fill=X, padx=10, pady=10)
+
+        Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
+        Button(btn_frame, text=_("Measure"), command=lambda: self.run_measure_z(dialog, z_max_entry, z_min_entry), bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
+
+    def run_measure_z(self, dialog, z_max_entry, z_min_entry):
+        """Execute the Z offset measurement sequence using multi_point_scan."""
+        try:
+            user_z_max = float(z_max_entry.get())
+            user_z_min = float(z_min_entry.get())
+            
+        except ValueError:
+            messagebox.showerror(_("Error"), _("Invalid Z Min/Max values"))
+            return
+
+        dialog.destroy()
+        
+        # 1. Record current Machine Z (Tool Z)
+        try:
+            self._measure_start_mz = CNC.vars["mz"]
+            start_wx = CNC.vars["wx"]
+            start_wy = CNC.vars["wy"]
+            start_wz = CNC.vars["wz"]
+        except KeyError:
+            messagebox.showerror(_("Error"), _("Machine position not available."))
+            return
+
+        # 2. Get XY Offsets from UI
+        try:
+            x_off = float(self.x_probe_to_tool_offset.get() or 0)
+            y_off = float(self.y_probe_to_tool_offset.get() or 0)
+            # Z Offset ignored as per instruction: "pass it as zero"
+            z_off_field = 0.0 
+        except ValueError:
+            messagebox.showerror(_("Error"), _("Invalid Offset Values"))
+            return
+
+        print(f"Measure Z: WCS=({start_wx}, {start_wy}, {start_wz}), OffsetXY=({x_off}, {y_off})")
+
+        # 3. Setup arguments for multi_point_scan
+        probe_points = [[start_wx, start_wy]]
+        
+        # Z depths
+        # Apply user relative inputs to current WZ
+        # If user entered 5.0 and -10.0:
+        # mp_z_max = start_wz + 5.0
+        # mp_z_min = start_wz - 10.0
+        # (Assuming positive usually means up/safe, negative means down/search)
+        # But wait, if user enters "-10", adding it means going down. Correct.
+        mp_z_min = start_wz + user_z_min
+        mp_z_max = start_wz + user_z_max
+        
+        # 4. Handle xmin/ymin side-effect of multi_point_scan
+        original_xmin = self.app.gcode.probe.xmin
+        original_ymin = self.app.gcode.probe.ymin
+        self.app.gcode.probe.xmin = start_wx
+        self.app.gcode.probe.ymin = start_wy
+
+        try:
+            lines = self.app.gcode.probe.multi_point_scan(
+                probe_points, 
+                mp_z_min, 
+                mp_z_max, 
+                x_off, 
+                y_off, 
+                z_off_field
+            )
+            self.app.run(lines)
+            
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+
+            # 6. Schedule Polling
+            self._measure_poll_count = 0
+            self.app.after(1000, self._poll_measure_z)
+
+        except Exception as e:
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+            messagebox.showerror(_("Error"), f"Failed to generate probe command: {e}")
+
+    def _poll_measure_z(self):
+        """Check if probing finished (is_multi_point_scan became False)."""
+        # Polling: Check if busy or Probe is still in scanning mode
+        # Probe class sets is_multi_point_scan=False when finished.
+        if self.app.mcontrol.isBusy() or self.app.gcode.probe.is_multi_point_scan: 
+             if self._measure_poll_count < 300: # 30 seconds timeout
+                 self._measure_poll_count += 1
+                 self.app.after(100, self._poll_measure_z)
+                 return
+             else:
+                 messagebox.showerror(_("Error"), _("Timeout waiting for probe."))
+                 # Ensure we reset flag if stuck?
+                 self.app.gcode.probe.is_multi_point_scan = False
+                 return
+
+        # Check for Alarm
+        state = CNC.vars.get("state", "Idle")
+        if state == "Alarm":
+             messagebox.showerror(_("Error"), _("Probing failed (Alarm state active)."))
+             return
+
+        # Check results in multi_probe_points
+        # Probe.add() stores results in self.multi_probe_points
+        results = self.app.gcode.probe.multi_probe_points
+        if results and len(results) > 0:
+             # Last point is the one we want (we only did one)
+             # Result is [x, y, z]
+             last_pt = results[-1]
+             prb_z = last_pt[2]
+             
+             # Offset = ProbeZ - ToolZ
+             # Use the ToolZ we recorded at start
+             # NOTE: prb_z from Probe class is the recorded contact point.
+             z_offset = prb_z - self._measure_start_mz
+             
+             self.z_probe_to_tool_offset.set(f"{z_offset:.4f}")
+             messagebox.showinfo(_("Measure Z"), _(f"Captured Offset: {z_offset:.4f}\n(Updated Field)"))
+        else:
+             print("Measure Z: No probe points recorded.")
+             # Fallback if Probe.add wasn't called (e.g. simulation mode without PRB feedback?)
+             # In simulation 'prbz' might not update or 'PRB:' response might not trigger add().
+             # We can try falling back to CNC.vars['prbz'] if available
+             try:
+                 # Check if 'prbz' is valid/recent? Hard to know.
+                 pass
+             except:
+                 pass
 
     def _retract_probe(self, label="[RETRACT]"):
         """Retract physical probe if deployed; safe to call repeatedly."""

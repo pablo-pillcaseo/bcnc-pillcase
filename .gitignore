@@ -20,3 +20,4 @@ bCNC/output.blend1
 test_codes/
 *.exe
 *.spec
+/env
