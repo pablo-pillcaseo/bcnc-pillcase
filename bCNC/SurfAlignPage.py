@@ -1981,6 +1981,15 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         # Deploy probe and run with delay (similar to _deploy_and_run pattern)
         def _deploy_and_run_calibration():
+            # Move Z-up before deploying probe
+            try:
+                safe_z = self._calibration_mp_z_max
+                if hasattr(self.app, "mcontrol") and hasattr(self.app.mcontrol, "jog"):
+                    self.app.mcontrol.jog(f"Z{safe_z:.4f}")
+                    print(f"[SET_TOOL_HEIGHT] Jog Z to safe height: {safe_z:.4f}")
+            except Exception as e:
+                print(f"[SET_TOOL_HEIGHT] Jog Z before deploy error: {e}")
+
             try:
                 # Deploy probe
                 self.app.blt_serial_send('1')
