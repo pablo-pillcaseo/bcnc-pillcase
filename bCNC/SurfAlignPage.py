@@ -1970,39 +1970,60 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.app.gcode.probe.xmin = start_wx
         self.app.gcode.probe.ymin = start_wy
 
-        try:
-            # Generate probe sequence
-            # Pass 0 for x_off and y_off so probe happens at current XY position
-            lines = self.app.gcode.probe.multi_point_scan(
-                probe_points, 
-                mp_z_min, 
-                mp_z_max, 
-                0.0,  # No X offset - probe at current position
-                0.0,  # No Y offset - probe at current position
-                0.0   # No Z offset for probing
-            )
-            
-            self.app.run(lines)
-            
-            # Restore xmin/ymin
-            self.app.gcode.probe.xmin = original_xmin
-            self.app.gcode.probe.ymin = original_ymin
+        # Store parameters for the delayed callback
+        self._calibration_original_xmin = original_xmin
+        self._calibration_original_ymin = original_ymin
+        self._calibration_probe_points = probe_points
+        self._calibration_mp_z_min = mp_z_min
+        self._calibration_mp_z_max = mp_z_max
+        self._safe_height_for_loose_tool = user_safe_height
+        self._loose_tool_descent_feed_rate = user_feed_rate
 
-            # Wait for probe to complete, then adjust Z position
-            self._calibration_poll_count = 0
-            self._safe_height_for_loose_tool = user_safe_height  # Store for later
-            self._loose_tool_descent_feed_rate = user_feed_rate  # Store feed rate
-            self.app.after(1000, self._poll_calibration_complete)
+        # Deploy probe and run with delay (similar to _deploy_and_run pattern)
+        def _deploy_and_run_calibration():
+            try:
+                # Deploy probe
+                self.app.blt_serial_send('1')
+                self.probe_deployed = True
+                print("[SET_TOOL_HEIGHT] Probe deployed")
+            except Exception as e:
+                print(f"[SET_TOOL_HEIGHT] Deploy probe error: {e}")
 
-        except Exception as e:
-            self.app.gcode.probe.xmin = original_xmin
-            self.app.gcode.probe.ymin = original_ymin
-            messagebox.showerror(_("Error"), f"Failed to run probe: {e}")
+            try:
+                # Generate probe sequence
+                # Pass 0 for x_off and y_off so probe happens at current XY position
+                lines = self.app.gcode.probe.multi_point_scan(
+                    self._calibration_probe_points, 
+                    self._calibration_mp_z_min, 
+                    self._calibration_mp_z_max, 
+                    0.0,  # No X offset - probe at current position
+                    0.0,  # No Y offset - probe at current position
+                    0.0   # No Z offset for probing
+                )
+                
+                self.app.run(lines)
+                
+                # Restore xmin/ymin
+                self.app.gcode.probe.xmin = self._calibration_original_xmin
+                self.app.gcode.probe.ymin = self._calibration_original_ymin
+
+                # Wait for probe to complete, then adjust Z position
+                self._calibration_poll_count = 0
+                self.app.after(1000, self._poll_calibration_complete)
+
+            except Exception as e:
+                self.app.gcode.probe.xmin = self._calibration_original_xmin
+                self.app.gcode.probe.ymin = self._calibration_original_ymin
+                self._retract_probe("[SET_TOOL_HEIGHT_ERROR]")
+                messagebox.showerror(_("Error"), f"Failed to run probe: {e}")
+
+        # Delay deploy to allow any pending operations to complete
+        self.app.after(500, _deploy_and_run_calibration)
 
     def _poll_calibration_complete(self):
         """Poll for probe completion, then move tool to calibration position."""
         # Check if probe is still running
-        if self.app.mcontrol.isBusy() or self.app.gcode.probe.is_multi_point_scan:
+        if self.app.running or self.app.gcode.probe.is_multi_point_scan:
             if self._calibration_poll_count < 300:  # 30 second timeout
                 self._calibration_poll_count += 1
                 self.app.after(100, self._poll_calibration_complete)
@@ -2010,13 +2031,18 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             else:
                 messagebox.showerror(_("Error"), _("Timeout waiting for probe."))
                 self.app.gcode.probe.is_multi_point_scan = False
+                self._retract_probe("[CALIBRATION_TIMEOUT]")
                 return
 
         # Check for alarm
         state = CNC.vars.get("state", "Idle")
         if state == "Alarm":
+            self._retract_probe("[CALIBRATION_ALARM]")
             messagebox.showerror(_("Error"), _("Probing failed (Alarm state)."))
             return
+
+        # Retract probe after successful completion
+        self._retract_probe("[CALIBRATION_COMPLETE]")
 
         # Get probe results
         results = self.app.gcode.probe.multi_probe_points
@@ -2182,7 +2208,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """Check if probing finished (is_multi_point_scan became False)."""
         # Polling: Check if busy or Probe is still in scanning mode
         # Probe class sets is_multi_point_scan=False when finished.
-        if self.app.mcontrol.isBusy() or self.app.gcode.probe.is_multi_point_scan: 
+        if self.app.running or self.app.gcode.probe.is_multi_point_scan:
              if self._measure_poll_count < 300: # 30 seconds timeout
                  self._measure_poll_count += 1
                  self.app.after(100, self._poll_measure_z)
