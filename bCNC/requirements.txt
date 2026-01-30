@@ -1,5 +1,5 @@
 pyserial==3.0.1
-numpy==1.26.4
+numpy>=1.12
 Pillow==11.1.0
 opencv-python==4.5.5.64
 bpy==4.2.0

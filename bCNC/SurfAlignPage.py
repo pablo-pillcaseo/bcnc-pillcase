@@ -1979,17 +1979,17 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self._safe_height_for_loose_tool = user_safe_height
         self._loose_tool_descent_feed_rate = user_feed_rate
 
+        # Move Z-up before deploying probe (outside callback so it has time to complete)
+        try:
+            safe_z = mp_z_max
+            if hasattr(self.app, "mcontrol") and hasattr(self.app.mcontrol, "jog"):
+                self.app.mcontrol.jog(f"Z{safe_z:.4f}")
+                print(f"[SET_TOOL_HEIGHT] Jog Z to safe height: {safe_z:.4f}")
+        except Exception as e:
+            print(f"[SET_TOOL_HEIGHT] Jog Z before deploy error: {e}")
+
         # Deploy probe and run with delay (similar to _deploy_and_run pattern)
         def _deploy_and_run_calibration():
-            # Move Z-up before deploying probe
-            try:
-                safe_z = self._calibration_mp_z_max
-                if hasattr(self.app, "mcontrol") and hasattr(self.app.mcontrol, "jog"):
-                    self.app.mcontrol.jog(f"Z{safe_z:.4f}")
-                    print(f"[SET_TOOL_HEIGHT] Jog Z to safe height: {safe_z:.4f}")
-            except Exception as e:
-                print(f"[SET_TOOL_HEIGHT] Jog Z before deploy error: {e}")
-
             try:
                 # Deploy probe
                 self.app.blt_serial_send('1')
@@ -2026,7 +2026,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                 self._retract_probe("[SET_TOOL_HEIGHT_ERROR]")
                 messagebox.showerror(_("Error"), f"Failed to run probe: {e}")
 
-        # Delay deploy to allow any pending operations to complete
+        # Delay deploy to allow Z movement to complete
         self.app.after(500, _deploy_and_run_calibration)
 
     def _poll_calibration_complete(self):
