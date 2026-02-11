@@ -1742,6 +1742,11 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.z_safety_limit.set(Utils.getFloat("SurfAlign", "z_safety_limit"))
         self.step_size.set(Utils.getFloat("SurfAlign", "step_size"))
         self.polynomial_degree.set(Utils.getInt("SurfAlign", "polynomial_degree"))
+        self._tool_tighten_error = Utils.getFloat("SurfAlign", "tool_tighten_error")
+        self._toolcal_z_max = Utils.getFloat("SurfAlign", "toolcal_z_max", 5.0)
+        self._toolcal_z_min = Utils.getFloat("SurfAlign", "toolcal_z_min", -10.0)
+        self._toolcal_safe_height = Utils.getFloat("SurfAlign", "toolcal_safe_height", 5.0)
+        self._toolcal_feed_rate = Utils.getFloat("SurfAlign", "toolcal_feed_rate", 50.0)
         self.update_validation_status()
         self._on_probe_method_change()
 
@@ -1757,6 +1762,11 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Utils.setFloat("SurfAlign", "z_safety_limit", self.z_safety_limit.get())
         Utils.setFloat("SurfAlign", "step_size", self.step_size.get())
         Utils.setInt("SurfAlign", "polynomial_degree", self.polynomial_degree.get())
+        Utils.setFloat("SurfAlign", "tool_tighten_error", getattr(self, '_tool_tighten_error', 0.0))
+        Utils.setFloat("SurfAlign", "toolcal_z_max", getattr(self, '_toolcal_z_max', 5.0))
+        Utils.setFloat("SurfAlign", "toolcal_z_min", getattr(self, '_toolcal_z_min', -10.0))
+        Utils.setFloat("SurfAlign", "toolcal_safe_height", getattr(self, '_toolcal_safe_height', 5.0))
+        Utils.setFloat("SurfAlign", "toolcal_feed_rate", getattr(self, '_toolcal_feed_rate', 50.0))
         
     def _on_probe_method_change(self, event=None):
         """Show/hide widgets depending on selected probe coverage method."""
@@ -1865,7 +1875,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """Show popup to guide user through physical tool height calibration."""
         dialog = Toplevel(self)
         dialog.title(_("Set Tool Height (Physical Calibration)"))
-        dialog.geometry("400x350")
+        dialog.geometry("400x370")
         dialog.resizable(False, False)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
@@ -1899,12 +1909,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Label(input_frame, text=_("Z Max (Safe):")).grid(row=0, column=0, sticky=E)
         z_max_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         z_max_entry.grid(row=0, column=1, padx=5)
-        z_max_entry.set(5.0)
+        z_max_entry.set(getattr(self, '_toolcal_z_max', 5.0))
 
         Label(input_frame, text=_("Z Min (Probe):")).grid(row=0, column=2, sticky=E)
         z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         z_min_entry.grid(row=0, column=3, padx=5)
-        z_min_entry.set(-10.0)
+        z_min_entry.set(getattr(self, '_toolcal_z_min', -10.0))
         # Explanatory text
         Label(dialog, text=_("Z values are relative to the current\nmachine position (for probe range)."), 
               justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).pack(anchor=W, padx=10, pady=(0, 5))
@@ -1916,29 +1926,36 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Label(tool_frame, text=_("Loose Tool Safe Z:")).grid(row=0, column=0, sticky=E)
         safe_height_entry = tkExtra.FloatEntry(tool_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         safe_height_entry.grid(row=0, column=1, padx=5)
-        safe_height_entry.set(5.0)
+        safe_height_entry.set(getattr(self, '_toolcal_safe_height', 5.0))
         tkExtra.Balloon.set(safe_height_entry, _("Safe clearance for moving loose tool, relative to tool position"))
         
         Label(tool_frame, text=_("Descent Feed Rate:")).grid(row=0, column=2, sticky=E)
         feed_rate_entry = tkExtra.FloatEntry(tool_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         feed_rate_entry.grid(row=0, column=3, padx=5)
-        feed_rate_entry.set(50.0)  # Default 50 mm/min
+        feed_rate_entry.set(getattr(self, '_toolcal_feed_rate', 50.0))
         tkExtra.Balloon.set(feed_rate_entry, _("Slow feed rate for lowering loose tool (mm/min)"))
+        
+        Label(tool_frame, text=_("Tighten Error:")).grid(row=1, column=0, sticky=E)
+        tighten_error_entry = tkExtra.FloatEntry(tool_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        tighten_error_entry.grid(row=1, column=1, padx=5)
+        tighten_error_entry.set(getattr(self, '_tool_tighten_error', 0.0))  # Load saved value
+        tkExtra.Balloon.set(tighten_error_entry, _("Distance the tool shifts up when tightened (mm).\nTool will be raised above target by this amount to account for tightening."))
 
         btn_frame = Frame(dialog)
         btn_frame.pack(fill=X, padx=10, pady=15)
 
         Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
-        Button(btn_frame, text=_("Start Calibration"), command=lambda: self.run_set_tool_height(dialog, z_max_entry, z_min_entry, safe_height_entry, feed_rate_entry), 
+        Button(btn_frame, text=_("Start Calibration"), command=lambda: self.run_set_tool_height(dialog, z_max_entry, z_min_entry, safe_height_entry, feed_rate_entry, tighten_error_entry), 
                bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
 
-    def run_set_tool_height(self, dialog, z_max_entry, z_min_entry, safe_height_entry, feed_rate_entry):
+    def run_set_tool_height(self, dialog, z_max_entry, z_min_entry, safe_height_entry, feed_rate_entry, tighten_error_entry):
         """Execute the tool height calibration sequence."""
         try:
             user_z_max = float(z_max_entry.get())
             user_z_min = float(z_min_entry.get())
             user_safe_height = float(safe_height_entry.get())
             user_feed_rate = float(feed_rate_entry.get())
+            user_tighten_error = float(tighten_error_entry.get())
         except ValueError:
             messagebox.showerror(_("Error"), _("Invalid input values"))
             return
@@ -1978,6 +1995,17 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self._calibration_mp_z_max = mp_z_max
         self._safe_height_for_loose_tool = user_safe_height
         self._loose_tool_descent_feed_rate = user_feed_rate
+        self._tool_tighten_error = user_tighten_error
+        self._toolcal_z_max = user_z_max
+        self._toolcal_z_min = user_z_min
+        self._toolcal_safe_height = user_safe_height
+        self._toolcal_feed_rate = user_feed_rate
+        # Save all popup values immediately
+        Utils.setFloat("SurfAlign", "tool_tighten_error", user_tighten_error)
+        Utils.setFloat("SurfAlign", "toolcal_z_max", user_z_max)
+        Utils.setFloat("SurfAlign", "toolcal_z_min", user_z_min)
+        Utils.setFloat("SurfAlign", "toolcal_safe_height", user_safe_height)
+        Utils.setFloat("SurfAlign", "toolcal_feed_rate", user_feed_rate)
 
         # Move Z-up before deploying probe (outside callback so it has time to complete)
         try:
@@ -2075,6 +2103,11 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             target_y = probe_y - y_off
             target_z = probe_z - z_off
             
+            # Account for tighten error: tool shifts up when tightened,
+            # so position tool above target by this amount
+            tighten_error = getattr(self, '_tool_tighten_error', 0.0)
+            target_z = target_z + tighten_error
+            
             # Generate movement commands
             move_commands = []
             move_commands.append(f"G90")  # Absolute positioning
@@ -2085,16 +2118,52 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             move_commands.append(f"G0 X{target_x:.4f} Y{target_y:.4f}")  # Move to target XY
             move_commands.append(f"G1 Z{target_z:.4f} F{feed_rate:.1f}")  # Lower slowly at specified feed rate
             
-            self.app.run(move_commands)
+            print(f"[SET_TOOL_HEIGHT] Sending move commands: {move_commands}")
             
-            messagebox.showinfo(_("Set Tool Height"), 
-                              _("Tool moved to probe location.\n\n"
-                                "Machine compensated for XYZ offset.\n"
-                                "Adjust the loose cutting bit to touch the surface,\n"
-                                "then tighten it.\n\n"
-                                f"Target: X{target_x:.4f} Y{target_y:.4f} Z{target_z:.4f}"))
+            # Store info for the completion message
+            self._tool_height_target = (target_x, target_y, target_z)
+
+            # Defer the run() call so the previous probe run state fully clears
+            def _run_move_commands():
+                if self.app.running:
+                    # Still running from probe — retry shortly
+                    print("[SET_TOOL_HEIGHT] App still running, retrying in 500ms...")
+                    self.app.after(500, _run_move_commands)
+                    return
+                try:
+                    self.app.run(move_commands)
+                    print("[SET_TOOL_HEIGHT] Move commands sent successfully")
+                except Exception as e:
+                    print(f"[SET_TOOL_HEIGHT] Move command error: {e}")
+                    messagebox.showerror(_("Error"), f"Failed to move tool: {e}")
+                    return
+
+                # Poll for movement completion, then show the info dialog
+                self._tool_move_poll_count = 0
+                self.app.after(500, self._poll_tool_move_complete)
+
+            self.app.after(500, _run_move_commands)
         else:
             messagebox.showerror(_("Error"), _("No probe points recorded."))
+
+    def _poll_tool_move_complete(self):
+        """Poll until the tool movement commands finish, then show the info dialog."""
+        if self.app.running:
+            if self._tool_move_poll_count < 300:  # 30 second timeout
+                self._tool_move_poll_count += 1
+                self.app.after(100, self._poll_tool_move_complete)
+                return
+            else:
+                messagebox.showwarning(_("Warning"), _("Timeout waiting for tool movement to finish."))
+                return
+
+        target_x, target_y, target_z = self._tool_height_target
+        messagebox.showinfo(_("Set Tool Height"), 
+                          _("Tool moved to probe location.\n\n"
+                            "Machine compensated for XYZ offset.\n"
+                            "Adjust the loose cutting bit to touch the surface,\n"
+                            "then tighten it.\n\n"
+                            f"Target: X{target_x:.4f} Y{target_y:.4f} Z{target_z:.4f}"))
 
     def measure_z_offset_popup(self):
         """Show popup to guide user for Z offset measurement."""
