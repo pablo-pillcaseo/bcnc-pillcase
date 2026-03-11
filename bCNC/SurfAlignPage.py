@@ -1613,6 +1613,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         
         # Buttons row inside the LabelFrame (second row, below offsets)
         btn_row = 1
+        
+        # Measure Z (Bitsetter) Button
+        b = Button(offset_frame, text=_("Measure Z (Bitsetter)"), command=self.measure_z_offset_bitsetter_popup, padx=1, pady=1)
+        b.grid(row=btn_row, column=0, sticky=EW, padx=2)
+        tkExtra.Balloon.set(b, _("Measure Z Offset using a Bitsetter"))
+
         # Set Tool Height Button (Physical Calibration)
         b = Button(offset_frame, text=_("Set Tool Height"), command=self.set_tool_height_popup, padx=1, pady=1)
         b.grid(row=btn_row, column=1, sticky=EW, padx=2)
@@ -2329,6 +2335,179 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                  pass
              except:
                  pass
+
+    def measure_z_offset_bitsetter_popup(self):
+        """Show popup to guide user for Z offset measurement using Bitsetter."""
+        dialog = Toplevel(self)
+        dialog.title(_("Measure Z Offset (Bitsetter)"))
+        dialog.geometry("450x380")
+        dialog.resizable(False, False)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.focus_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
+
+        Label(dialog, text=_("1. Jog tool above the bitsetter (if not automatic)."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
+        Label(dialog, text=_("2. Click 'Measure'."), justify=LEFT).pack(anchor=W, padx=10, pady=5)
+        
+        input_frame = Frame(dialog)
+        input_frame.pack(fill=X, padx=10, pady=5)
+        
+        Label(input_frame, text=_("Homing Command:")).grid(row=0, column=0, sticky=E)
+        homing_entry = Entry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        homing_entry.grid(row=0, column=1, padx=5, pady=2)
+        homing_entry.insert(0, Utils.getStr("SurfAlign", "bitsetter_homing", "$H"))
+        tkExtra.Balloon.set(homing_entry, _("Command to execute before moving to Z Start. (e.g., $H or G53 G0 Z0, leave blank to skip)"))
+
+        Label(input_frame, text=_("Z Start Near Bitsetter:")).grid(row=1, column=0, sticky=E)
+        z_start_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        z_start_entry.grid(row=1, column=1, padx=5, pady=2)
+        z_start_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_start", -10.0))
+        tkExtra.Balloon.set(z_start_entry, _("Z height near bit setter in Machine Z to start probing from"))
+
+        Label(input_frame, text=_("Z Min (Probe Depth):")).grid(row=2, column=0, sticky=E)
+        z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        z_min_entry.grid(row=2, column=1, padx=5, pady=2)
+        z_min_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_min", -15))
+
+        Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=3, column=0, sticky=E)
+        bltouch_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        bltouch_z_entry.grid(row=3, column=1, padx=5, pady=2)
+        bltouch_z_entry.set(Utils.getFloat("SurfAlign", "bitsetter_bltouch_z", -60.0))
+        tkExtra.Balloon.set(bltouch_z_entry, _("Recorded Machine Z value of the calibrated BLTouch position touching the bitsetter."))
+
+        Label(input_frame, text=_("Probe Feed Rate:")).grid(row=4, column=0, sticky=E)
+        feed_rate_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        feed_rate_entry.grid(row=4, column=1, padx=5, pady=2)
+        feed_rate_entry.set(Utils.getFloat("SurfAlign", "bitsetter_feed_rate", 50.0))
+
+        btn_frame = Frame(dialog)
+        btn_frame.pack(fill=X, padx=10, pady=10)
+
+        Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
+        Button(btn_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_entry, z_start_entry, z_min_entry, bltouch_z_entry, feed_rate_entry), bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
+
+    def run_measure_z_bitsetter(self, dialog, homing_entry, z_start_entry, z_min_entry, bltouch_z_entry, feed_rate_entry):
+        try:
+            homing_cmd = homing_entry.get().strip()
+            z_start = float(z_start_entry.get())
+            z_min = float(z_min_entry.get())
+            self._bitsetter_bltouch_z = float(bltouch_z_entry.get())
+            feed_rate = float(feed_rate_entry.get())
+        except ValueError:
+            messagebox.showerror(_("Error"), _("Invalid numeric values"))
+            return
+
+        # Ensure the probe is retracted before starting homing/movements
+        self._retract_probe("[MEASURE_Z_BITSETTER]")
+
+        Utils.setStr("SurfAlign", "bitsetter_homing", homing_cmd)
+        Utils.setFloat("SurfAlign", "bitsetter_z_start", z_start)
+        Utils.setFloat("SurfAlign", "bitsetter_z_min", z_min)
+        Utils.setFloat("SurfAlign", "bitsetter_bltouch_z", self._bitsetter_bltouch_z)
+        Utils.setFloat("SurfAlign", "bitsetter_feed_rate", feed_rate)
+        dialog.destroy()
+
+        try:
+            start_wx = CNC.vars["wx"]
+            start_wy = CNC.vars["wy"]
+            start_wz = CNC.vars["wz"]
+        except KeyError:
+            messagebox.showerror(_("Error"), _("Machine position not available."))
+            return
+
+        print(f"Measure Z Bitsetter: WCS=({start_wx}, {start_wy}, {start_wz})")
+
+        try:
+            mz = CNC.vars["mz"]
+            wz = CNC.vars["wz"]
+        except:
+            mz = 0.0
+            wz = 0.0
+        z_offset_machine_to_wcs = mz - wz
+        
+        wcs_z_start = z_start - z_offset_machine_to_wcs
+        wcs_z_min = z_min - z_offset_machine_to_wcs
+        
+        probe_points = [[start_wx, start_wy]]
+        x_off = 0.0
+        y_off = 0.0
+        z_off_field = 0.0
+
+        original_xmin = self.app.gcode.probe.xmin
+        original_ymin = self.app.gcode.probe.ymin
+        self.app.gcode.probe.xmin = start_wx
+        self.app.gcode.probe.ymin = start_wy
+
+        try:
+            original_prbfeed = CNC.vars.get("prbfeed", 50.0)
+            CNC.vars["prbfeed"] = feed_rate # Set the feed rate for the probe temporarily
+            
+            scan_lines = self.app.gcode.probe.multi_point_scan(
+                probe_points, 
+                wcs_z_min, 
+                wcs_z_start, 
+                x_off, 
+                y_off, 
+                z_off_field
+            )
+            
+            CNC.vars["prbfeed"] = original_prbfeed # Restore the feed rate for the probe
+            
+            if homing_cmd:
+                scan_lines.insert(0, homing_cmd)
+                
+            self.app.run(scan_lines)
+            
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+
+            self._measure_poll_count = 0
+            self.app.after(1000, self._poll_measure_z_bitsetter)
+
+        except Exception as e:
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+            messagebox.showerror(_("Error"), f"Failed to generate probe command: {e}")
+
+    def _poll_measure_z_bitsetter(self):
+        if self.app.running or self.app.gcode.probe.is_multi_point_scan:
+             if self._measure_poll_count < 300:
+                 self._measure_poll_count += 1
+                 self.app.after(100, self._poll_measure_z_bitsetter)
+                 return
+             else:
+                 messagebox.showerror(_("Error"), _("Timeout waiting for probe."))
+                 self.app.gcode.probe.is_multi_point_scan = False
+                 return
+
+        state = CNC.vars.get("state", "Idle")
+        if state == "Alarm":
+             messagebox.showerror(_("Error"), _("Probing failed (Alarm state active)."))
+             return
+
+        results = self.app.gcode.probe.multi_probe_points
+        if results and len(results) > 0:
+             last_pt = results[-1]
+             prb_wcs_z = last_pt[2]
+             
+             try:
+                 mz = CNC.vars["mz"]
+                 wz = CNC.vars["wz"]
+                 z_offset_machine_to_wcs = mz - wz
+             except:
+                 z_offset_machine_to_wcs = 0.0
+                 
+             prb_machine_z = prb_wcs_z + z_offset_machine_to_wcs
+             
+             z_offset = self._bitsetter_bltouch_z - prb_machine_z
+             
+             self.z_probe_to_tool_offset.set(f"{z_offset:.4f}")
+             messagebox.showinfo(_("Measure Z (Bitsetter)"), _(f"Captured Offset: {z_offset:.4f}\n(Updated Field)"))
+        else:
+             print("Measure Z (Bitsetter): No probe points recorded.")
 
     def _retract_probe(self, label="[RETRACT]"):
         """Retract physical probe if deployed; safe to call repeatedly."""
