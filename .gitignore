@@ -21,3 +21,5 @@ test_codes/
 *.exe
 *.spec
 /env
+
+/tests

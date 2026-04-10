@@ -69,6 +69,9 @@ from tkinter import Tk, font
 import tkinter
 import tkinter as tk
 from fontTools.ttLib import TTFont
+import requests
+import keyring
+
 
 __author__ = Utils.__author__
 __email__ = Utils.__email__
@@ -350,6 +353,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     probeFeed = None
     tlo = None
     probeCmd = None
+    orderNumber = None
 
     # ===================== Lid Defaults (FontSize/Depth/LayerHeight) =====================
     def _load_lid_defaults(self):
@@ -492,7 +496,39 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         col = 0
 
         # ----
-        # Fast Probe Feed
+        # Order Number
+        Label(frame,
+              text=_("Order Number:")).grid(row=row, column=col, sticky=E)
+        col += 1
+        self.orderNumber = StringVar()
+        self.orderNumber.set(Utils.getStr("SurfAlign", "orderNumber"))
+
+        GenGcodeFrame.orderNumber = Entry(
+            frame,
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+            width=5,
+            textvariable=self.orderNumber,
+        )
+        GenGcodeFrame.orderNumber.grid(row=row, column=col, sticky=EW)
+        # Bind Enter key to fetch order from ShipHero
+        GenGcodeFrame.orderNumber.bind('<Return>', lambda event: self.fetchShipHeroOrder())
+        tkExtra.Balloon.set(
+            GenGcodeFrame.orderNumber,
+            _("Enter order number and press Enter to fetch from ShipHero"),
+        )
+        self.addWidget(GenGcodeFrame.orderNumber)
+
+        col += 1
+        self.fetchOrderBtn = Button(frame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
+        self.fetchOrderBtn.grid(row=row, column=col, sticky=W, padx=(2, 0))
+        tkExtra.Balloon.set(self.fetchOrderBtn, _("Fetch order details from ShipHero"))
+        self.addWidget(self.fetchOrderBtn)
+
+
+        # ----
+        # Engrave Text
+        row += 1
+        col = 0
         Label(frame,
               text=_("Engrave Text:")).grid(row=row, column=col, sticky=E)
         col += 1
@@ -826,6 +862,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         # Load all lids' defaults first
         self._lid_defaults = self._load_lid_defaults()
 
+        self.orderNumber.set(Utils.getStr("SurfAlign", "orderNumber"))
         self.engraveText.set(Utils.getStr("SurfAlign", "engraveText"))
         self.font_var.set(Utils.getStr("SurfAlign", "textFont"))
         self.fontSize.set(Utils.getFloat("SurfAlign", "fontSize"))
@@ -851,7 +888,365 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         if self.lidName.get().strip():
             self._apply_defaults_to_main_fields_if_available(self.lidName.get().strip())
 
+    def get_shiphero_credentials(self):
+        endpoint = Utils.getStr("SurfAlign", "shipheroEndpoint")
+        num_parts_str = Utils.getStr("SurfAlign", "shipheroTokenParts")
+        token = ""
+        if num_parts_str and num_parts_str.isdigit():
+            num_parts = int(num_parts_str)
+            for i in range(num_parts):
+                chunk = keyring.get_password("bCNC", f"shipheroToken_{i}")
+                if chunk:
+                    token += chunk
+        else:
+            try:
+                token = keyring.get_password("bCNC", "shipheroToken") or ""
+            except Exception:
+                token = ""
+        return endpoint, token
+
+    def set_shiphero_credentials(self, endpoint, token):
+        Utils.addSection("SurfAlign")
+        Utils.setStr("SurfAlign", "shipheroEndpoint", endpoint)
+        if token:
+            token = token.strip()
+            if token.lower().startswith("bearer "):
+                token = token[len("bearer "):].strip()
+            
+            try:
+                keyring.delete_password("bCNC", "shipheroToken")
+            except Exception:
+                pass
+            
+            chunk_size = 1000
+            chunks = [token[i:i+chunk_size] for i in range(0, len(token), chunk_size)]
+            
+            for i in range(20):
+                try:
+                    keyring.delete_password("bCNC", f"shipheroToken_{i}")
+                except Exception:
+                    pass
+            
+            for i, chunk in enumerate(chunks):
+                keyring.set_password("bCNC", f"shipheroToken_{i}", chunk)
+            
+            Utils.setStr("SurfAlign", "shipheroTokenParts", str(len(chunks)))
+        Utils.saveConfiguration()
+
+    def fetchShipHeroOrder(self, event=None):
+        order_number = self.orderNumber.get().strip()
+        if not order_number:
+            messagebox.showwarning(_("ShipHero"), _("Please enter an order number."))
+            return
+
+        endpoint, token = self.get_shiphero_credentials()
+        if not endpoint or not token:
+            if not self.show_shiphero_config_dialog():
+                return
+            endpoint, token = self.get_shiphero_credentials()
+
+        if not endpoint or not token:
+            messagebox.showerror(_("ShipHero"), _("ShipHero credentials not found."))   
+            return
+
+        # Prepare order number (add # if missing)
+        if not order_number.startswith("#"):
+            order_number = "#" + order_number
+
+        query = """
+        query GetOrder($orderNumber: String!) {
+          orders(order_number: $orderNumber) {
+            data {
+              edges {
+                node {
+                  line_items(first: 20) {
+                    edges {
+                      node {
+                        product_name
+                        custom_options
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+
+        try:
+            # Show a simple progress message or wait cursor
+            if hasattr(self, "fetchOrderBtn"):
+                self.fetchOrderBtn.config(state=DISABLED)
+            self.app.setStatus(_("Fetching from ShipHero..."), True)
+            self.app.config(cursor="watch")
+            self.app.update()
+            
+            response = requests.post(
+                endpoint,
+                json={"query": query, "variables": {"orderNumber": order_number}},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if "errors" in data:
+                error_msg = "; ".join([e.get("message", "Unknown error") for e in data["errors"]])
+                messagebox.showerror(_("ShipHero Error"), error_msg)
+                return
+
+            edges = data.get("data", {}).get("orders", {}).get("data", {}).get("edges", [])
+            if not edges:
+                messagebox.showinfo(_("ShipHero"), _("No order found with number: ") + order_number)
+                return
+
+            order_node = edges[0]["node"]
+            line_items = order_node.get("line_items", {}).get("edges", [])
+            
+            items_to_show = []
+            for item_edge in line_items:
+                node = item_edge["node"]
+                name = node.get("product_name", "Unknown")
+                custom = node.get("custom_options") or {}
+                # Custom options can be a list or a dict depending on API version/setup
+                engraving = ""
+                if isinstance(custom, dict):
+                    engraving = custom.get("Lid Engraving") or ""
+                elif isinstance(custom, list):
+                    for opt in custom:
+                        if opt.get("name") == "Lid Engraving":
+                            engraving = opt.get("value") or ""
+                            break
+
+                items_to_show.append((name, engraving))
+
+            if not items_to_show:
+                messagebox.showinfo(_("ShipHero"), _("Order found but no line items available."))
+                return
+
+            self.display_shiphero_order_popup(items_to_show)
+
+        except Exception as e:
+            messagebox.showerror(_("ShipHero Connection Error"), str(e))
+        finally:
+            self.app.config(cursor="")
+            self.app.setStatus("")
+            if hasattr(self, "fetchOrderBtn"):
+                self.fetchOrderBtn.config(state=NORMAL)
+
+    def show_shiphero_config_dialog(self):
+        dialog = Toplevel(self)
+        dialog.title(_("ShipHero API Configuration"))
+        dialog.geometry("500x250")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.winfo_rooty() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+
+        main_f = Frame(dialog, padx=20, pady=20)
+        main_f.pack(expand=YES, fill=BOTH)
+
+        Label(main_f, text=_("ShipHero GraphQL Endpoint:")).pack(anchor=W)
+        endpoint_var = StringVar(value=Utils.getStr("SurfAlign", "shipheroEndpoint", "https://public-api.shiphero.com/graphql"))
+        Entry(main_f, textvariable=endpoint_var, width=60).pack(pady=(0, 10))
+
+        Label(main_f, text=_("ShipHero Bearer Token:")).pack(anchor=W)
+        token_var = StringVar(value=keyring.get_password("bCNC", "shipheroToken") or "")
+        Entry(main_f, textvariable=token_var, width=60, show="*").pack(pady=(0, 10))
+        
+        Label(main_f, text=_("Credentials are stored securely in Windows Credential Manager."), 
+              font=("", 8, "italic"), foreground="gray").pack(anchor=W)
+
+        success = [False]
+
+        def save():
+            self.set_shiphero_credentials(endpoint_var.get().strip(), token_var.get().strip())
+            success[0] = True
+            dialog.destroy()
+
+        def cancel():
+            dialog.destroy()
+
+        btn_f = Frame(main_f)
+        btn_f.pack(pady=(20, 0))
+        Button(btn_f, text=_("Save"), command=save, width=10).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Cancel"), command=cancel, width=10).pack(side=LEFT, padx=5)
+        
+        self.wait_window(dialog)
+        return success[0]
+
+    def show_product_mapping_dialog(self, parent_popup, current_products, refresh_callback):
+        import json
+        dialog = Toplevel(parent_popup)
+        dialog.title(_("Product to Lid Mapping"))
+        dialog.geometry("600x400")
+        dialog.transient(parent_popup)
+        dialog.grab_set()
+        
+        mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
+        try:
+            mapping = json.loads(mapping_str)
+        except Exception:
+            mapping = {}
+            
+        frame = Frame(dialog)
+        frame.pack(expand=YES, fill=BOTH, padx=10, pady=10)
+        
+        tree = ttk.Treeview(frame, columns=("Product", "LidName"), show='headings')
+        tree.heading("Product", text=_("Product Name"))
+        tree.heading("LidName", text=_("Lid Name"))
+        tree.column("Product", width=350)
+        tree.column("LidName", width=200)
+        
+        tree.pack(side=LEFT, expand=YES, fill=BOTH)
+        
+        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        tree.configure(yscrollcommand=scrollbar.set)
+        
+        products_to_show = set(mapping.keys())
+        for p in current_products:
+            products_to_show.add(p)
+            
+        for p in sorted(products_to_show):
+            lid = mapping.get(p, "")
+            tree.insert("", END, values=(p, lid))
+            
+        edit_f = Frame(dialog)
+        edit_f.pack(fill=X, padx=10, pady=5)
+        
+        Label(edit_f, text=_("Lid Name:")).pack(side=LEFT)
+        lid_var = StringVar()
+        lid_cb = ttk.Combobox(edit_f, textvariable=lid_var, values=self.lid_list, state="readonly")
+        lid_cb.pack(side=LEFT, fill=X, expand=YES, padx=5)
+        
+        def on_select(e):
+            selected = tree.selection()
+            if selected:
+                lid = tree.item(selected[0])['values'][1]
+                lid_var.set(lid if lid else "")
+        tree.bind("<<TreeviewSelect>>", on_select)
+        
+        def save_mapping():
+            selected = tree.selection()
+            if selected:
+                p = tree.item(selected[0])['values'][0]
+                lid = lid_var.get().strip()
+                if lid:
+                    mapping[p] = lid
+                    tree.item(selected[0], values=(p, lid))
+                else:
+                    if p in mapping:
+                        del mapping[p]
+                    tree.item(selected[0], values=(p, ""))
+                    
+        Button(edit_f, text=_("Update Mapping"), command=save_mapping).pack(side=LEFT)
+        
+        def close_and_save():
+            Utils.setStr("SurfAlign", "productToLidMap", json.dumps(mapping))
+            Utils.saveConfiguration()
+            dialog.destroy()
+            refresh_callback()
+            
+        Button(dialog, text=_("Close"), command=close_and_save).pack(pady=10)
+
+    def display_shiphero_order_popup(self, items):
+        import json
+        popup = Toplevel(self)
+        popup.title(_("ShipHero Order Items"))
+        popup.geometry("800x500")
+        popup.transient(self)
+        
+        # Center popup
+        popup.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() // 2) - (popup.winfo_width() // 2)
+        y = self.winfo_rooty() + (self.winfo_height() // 2) - (popup.winfo_height() // 2)
+        popup.geometry(f"+{x}+{y}")
+        
+        Label(popup, text=_("Select a product to import its 'Lid Engraving' text:"), 
+              font=("", 10, "bold"), pady=10).pack()
+
+        frame = Frame(popup)
+        frame.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
+        
+        tree = ttk.Treeview(frame, columns=("Product", "Engraving"), show='headings')
+        tree.heading("Product", text=_("Product Name"))
+        tree.heading("Engraving", text=_("Lid Engraving Content"))
+        tree.column("Product", width=500)
+        tree.column("Engraving", width=250)
+        
+        tree.pack(side=LEFT, expand=YES, fill=BOTH)
+        
+        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        tree.configure(yscrollcommand=scrollbar.set)
+        
+        tree.tag_configure('unmapped', background='#ffcccc')
+        
+        def get_mapping():
+            mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
+            try:
+                return json.loads(mapping_str)
+            except Exception:
+                return {}
+
+        def refresh_tree():
+            for item in tree.get_children():
+                tree.delete(item)
+            mapping = get_mapping()
+            for name, engraving in items:
+                tag = ()
+                if name not in mapping:
+                    tag = ('unmapped',)
+                tree.insert("", END, values=(name, engraving), tags=tag)
+
+        refresh_tree()
+
+        def on_select(event):
+            selected = tree.selection()
+            if selected:
+                item_values = tree.item(selected[0])['values']
+                name_val = item_values[0]
+                eng_val = item_values[1]
+                
+                mapping = get_mapping()
+                if name_val not in mapping:
+                    messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to a Lid Name. Please map it first."), parent=popup)
+                    return
+                    
+                if not eng_val or eng_val == "None":
+                    messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
+                    return
+                
+                mapped_lid = mapping[name_val]
+                
+                self.engraveText.set(str(eng_val))
+                self.lidName.set(mapped_lid)
+                
+                if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
+                    self._apply_defaults_to_main_fields_if_available(mapped_lid)
+                    
+                # Highlight that it's updated
+                messagebox.showinfo(_("Imported"), _("Engraving text and Lid Name updated from selected item."), parent=popup)
+                popup.destroy()
+
+        tree.bind("<Double-1>", on_select) # Double click to select
+        
+        btn_f = Frame(popup)
+        btn_f.pack(pady=10)
+        
+        Button(btn_f, text=_("Import Selection"), command=lambda: on_select(None), width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Map Products..."), command=lambda: self.show_product_mapping_dialog(popup, [item[0] for item in items], refresh_tree), width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Close"), command=popup.destroy, width=15).pack(side=LEFT, padx=5)
+
     def generateGcode(self):
+
         print("Generate Gcode")
         engrave_text = self.engraveText.get()
         work_area_width, work_area_height = 500, 500
@@ -920,6 +1315,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
     # # -----------------------------------------------------------------------
     def saveConfig(self):
+        Utils.setStr("SurfAlign", "orderNumber", self.orderNumber.get())
         Utils.setStr("SurfAlign", "engraveText", self.engraveText.get())
         Utils.setStr("SurfAlign", "textFont", self.font_var.get())
         Utils.setFloat("SurfAlign", "fontSize", self.fontSize.get())

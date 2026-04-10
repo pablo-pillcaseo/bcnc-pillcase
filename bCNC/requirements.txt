@@ -11,3 +11,4 @@ bCNC==0.9.16
 opencamlib==2023.1.11
 python-tsp==0.5.0
 requests==2.32.5
+keyring==25.6.0
