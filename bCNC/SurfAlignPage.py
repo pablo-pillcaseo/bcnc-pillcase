@@ -2620,6 +2620,9 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         dialog.destroy()
         
+        # 0. Ensure probe is retracted before any movement
+        self._retract_probe("[MEASURE_Z]")
+
         # 1. Record current Machine Z (Tool Z)
         try:
             self._measure_start_mz = CNC.vars["mz"]
@@ -2647,11 +2650,6 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         
         # Z depths
         # Apply user relative inputs to current WZ
-        # If user entered 5.0 and -10.0:
-        # mp_z_max = start_wz + 5.0
-        # mp_z_min = start_wz - 10.0
-        # (Assuming positive usually means up/safe, negative means down/search)
-        # But wait, if user enters "-10", adding it means going down. Correct.
         mp_z_min = start_wz + user_z_min
         mp_z_max = start_wz + user_z_max
         
@@ -2661,28 +2659,50 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.app.gcode.probe.xmin = start_wx
         self.app.gcode.probe.ymin = start_wy
 
+        # 5. Move Z-up before deploying probe
         try:
-            lines = self.app.gcode.probe.multi_point_scan(
-                probe_points, 
-                mp_z_min, 
-                mp_z_max, 
-                x_off, 
-                y_off, 
-                z_off_field
-            )
-            self.app.run(lines)
-            
-            self.app.gcode.probe.xmin = original_xmin
-            self.app.gcode.probe.ymin = original_ymin
-
-            # 6. Schedule Polling
-            self._measure_poll_count = 0
-            self.app.after(1000, self._poll_measure_z)
-
+            if hasattr(self.app, "mcontrol") and hasattr(self.app.mcontrol, "jog"):
+                self.app.mcontrol.jog(f"Z{mp_z_max:.4f}")
+                print(f"[MEASURE_Z] Jog Z to safe height: {mp_z_max:.4f}")
         except Exception as e:
-            self.app.gcode.probe.xmin = original_xmin
-            self.app.gcode.probe.ymin = original_ymin
-            messagebox.showerror(_("Error"), f"Failed to generate probe command: {e}")
+            print(f"[MEASURE_Z] Jog Z before deploy error: {e}")
+
+        def _deploy_and_run_measure():
+            try:
+                # Deploy probe
+                self.app.blt_serial_send('1')
+                self.probe_deployed = True
+                print("[MEASURE_Z] Probe deployed")
+            except Exception as e:
+                print(f"[MEASURE_Z] Deploy probe error: {e}")
+
+            try:
+                lines = self.app.gcode.probe.multi_point_scan(
+                    probe_points, 
+                    mp_z_min, 
+                    mp_z_max, 
+                    x_off, 
+                    y_off, 
+                    z_off_field
+                )
+                self.app.run(lines)
+                
+                self.app.gcode.probe.xmin = original_xmin
+                self.app.gcode.probe.ymin = original_ymin
+
+                # 6. Schedule Polling
+                self._measure_poll_count = 0
+                self.app.after(1000, self._poll_measure_z)
+
+            except Exception as e:
+                self.app.gcode.probe.xmin = original_xmin
+                self.app.gcode.probe.ymin = original_ymin
+                self._retract_probe("[MEASURE_Z_ERROR]")
+                messagebox.showerror(_("Error"), f"Failed to generate probe command: {e}")
+
+        # Delay deploy to allow Z movement to complete
+        self.app.after(500, _deploy_and_run_measure)
+
 
     def _poll_measure_z(self):
         """Check if probing finished (is_multi_point_scan became False)."""
