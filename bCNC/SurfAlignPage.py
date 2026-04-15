@@ -2906,16 +2906,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
              last_pt = results[-1]
              prb_wcs_z = last_pt[2]
              
-             try:
-                 mz = CNC.vars["mz"]
-                 wz = CNC.vars["wz"]
-                 z_offset_machine_to_wcs = mz - wz
-             except:
-                 z_offset_machine_to_wcs = 0.0
-                 
-             prb_machine_z = prb_wcs_z + z_offset_machine_to_wcs
-             
-             z_offset = self._bitsetter_bltouch_z - prb_machine_z
+
+             z_offset = self._bitsetter_bltouch_z - prb_wcs_z
              
              self.z_probe_to_tool_offset.set(f"{z_offset:.4f}")
              messagebox.showinfo(_("Measure Z (Bitsetter)"), _(f"Captured Offset: {z_offset:.4f}\n(Updated Field)"))
