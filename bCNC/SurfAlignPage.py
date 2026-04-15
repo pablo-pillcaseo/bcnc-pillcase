@@ -2777,16 +2777,20 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         homing_entry.insert(0, Utils.getStr("SurfAlign", "bitsetter_homing", "$H"))
         tkExtra.Balloon.set(homing_entry, _("Command to execute before moving to Z Start. (e.g., $H or G53 G0 Z0, leave blank to skip)"))
 
-        Label(input_frame, text=_("Z Start Near Bitsetter:")).grid(row=1, column=0, sticky=E)
+        Label(input_frame, text=_("Z Start (Safe):")).grid(row=1, column=0, sticky=E, pady=(10, 2))
         z_start_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        z_start_entry.grid(row=1, column=1, padx=5, pady=2)
-        z_start_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_start", -10.0))
-        tkExtra.Balloon.set(z_start_entry, _("Z height near bit setter in Machine Z to start probing from"))
+        z_start_entry.grid(row=1, column=1, padx=5, pady=(10, 2))
+        z_start_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_start", 5.0))
+        tkExtra.Balloon.set(z_start_entry, _("Z height relative to current position to start probing from"))
 
-        Label(input_frame, text=_("Z Min (Probe Depth):")).grid(row=2, column=0, sticky=E)
+        Label(input_frame, text=_("Z Min (Probe):")).grid(row=2, column=0, sticky=E, pady=(2, 10))
         z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        z_min_entry.grid(row=2, column=1, padx=5, pady=2)
-        z_min_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_min", -15))
+        z_min_entry.grid(row=2, column=1, padx=5, pady=(2, 10))
+        z_min_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_min", -15.0))
+
+        # Explanatory text on the right
+        Label(input_frame, text=_("(Relative to current\ntool position)"), 
+              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=2, rowspan=2, sticky=W, padx=5)
 
         Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=3, column=0, sticky=E)
         bltouch_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
@@ -2836,16 +2840,9 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         print(f"Measure Z Bitsetter: WCS=({start_wx}, {start_wy}, {start_wz})")
 
-        try:
-            mz = CNC.vars["mz"]
-            wz = CNC.vars["wz"]
-        except:
-            mz = 0.0
-            wz = 0.0
-        z_offset_machine_to_wcs = mz - wz
-        
-        wcs_z_start = z_start - z_offset_machine_to_wcs
-        wcs_z_min = z_min - z_offset_machine_to_wcs
+        # Apply user relative inputs to current WZ
+        wcs_z_start = start_wz + z_start
+        wcs_z_min = start_wz + z_min
         
         probe_points = [[start_wx, start_wy]]
         x_off = 0.0
