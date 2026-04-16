@@ -2756,7 +2756,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """Show popup to guide user for Z offset measurement using Bitsetter."""
         dialog = Toplevel(self)
         dialog.title(_("Measure Z Offset (Bitsetter)"))
-        dialog.geometry("450x380")
+        dialog.geometry("420x280")
         dialog.resizable(False, False)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
@@ -2764,33 +2764,37 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         
         # Center dialog
         dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
-
-        Label(dialog, text=_("1. Jog tool above the bitsetter (if not automatic)."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
-        Label(dialog, text=_("2. Click 'Measure'."), justify=LEFT).pack(anchor=W, padx=10, pady=5)
         
         input_frame = Frame(dialog)
         input_frame.pack(fill=X, padx=10, pady=5)
         
-        Label(input_frame, text=_("Homing Command:")).grid(row=0, column=0, sticky=E)
-        homing_entry = Entry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        homing_entry.grid(row=0, column=1, padx=5, pady=2)
-        homing_entry.insert(0, Utils.getStr("SurfAlign", "bitsetter_homing", "$H"))
-        tkExtra.Balloon.set(homing_entry, _("Command to execute before moving to Z Start. (e.g., $H or G53 G0 Z0, leave blank to skip)"))
+        Label(input_frame, text=_("Probe start Pos (X,Z):")).grid(row=0, column=0, sticky=E)
+        pos_frame = Frame(input_frame)
+        pos_frame.grid(row=0, column=1, sticky=W)
+        
+        homing_x_entry = tkExtra.FloatEntry(pos_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        homing_x_entry.pack(side=LEFT)
+        homing_x_entry.set(Utils.getStr("SurfAlign", "bitsetter_x", ""))
+        tkExtra.Balloon.set(homing_x_entry, _("Machine X coordinate to jog to before probing, Bitsetter position"))
 
-        Label(input_frame, text=_("Z Start (Safe):")).grid(row=1, column=0, sticky=E, pady=(10, 2))
-        z_start_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        z_start_entry.grid(row=1, column=1, padx=5, pady=(10, 2))
-        z_start_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_start", 5.0))
-        tkExtra.Balloon.set(z_start_entry, _("Z height relative to current position to start probing from"))
+        homing_z_entry = tkExtra.FloatEntry(pos_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        homing_z_entry.pack(side=LEFT, padx=(5, 0))
+        homing_z_entry.set(Utils.getStr("SurfAlign", "bitsetter_z", ""))
+        tkExtra.Balloon.set(homing_z_entry, _("Machine Z (Safe height) to jog to before probing"))
 
-        Label(input_frame, text=_("Z Min (Probe):")).grid(row=2, column=0, sticky=E, pady=(2, 10))
-        z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        z_min_entry.grid(row=2, column=1, padx=5, pady=(2, 10))
-        z_min_entry.set(Utils.getFloat("SurfAlign", "bitsetter_z_min", -15.0))
+        home_first_var = IntVar()
+        home_first_var.set(Utils.getInt("SurfAlign", "bitsetter_home_first", 1))
+        Checkbutton(input_frame, text=_("Home ($H) first"), variable=home_first_var).grid(row=2, column=1, sticky=W, pady=(5, 0))
+
+        Label(input_frame, text=_("Probe Depth:")).grid(row=1, column=0, sticky=E, pady=(10, 2))
+        probe_depth_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        probe_depth_entry.grid(row=1, column=1, padx=5, pady=(10, 2))
+        probe_depth_entry.set(Utils.getFloat("SurfAlign", "bitsetter_probe_depth", 10.0))
+        tkExtra.Balloon.set(probe_depth_entry, _("How far (mm) to descend from the Probe Start Z position"))
 
         # Explanatory text on the right
-        Label(input_frame, text=_("(Relative to current\ntool position)"), 
-              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=2, rowspan=2, sticky=W, padx=5)
+        Label(input_frame, text=_("(mm downward from\nProbe Start Pos Z)"),
+              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=2, sticky=W, padx=5)
 
         Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=3, column=0, sticky=E)
         bltouch_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
@@ -2803,19 +2807,17 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         feed_rate_entry.grid(row=4, column=1, padx=5, pady=2)
         feed_rate_entry.set(Utils.getFloat("SurfAlign", "bitsetter_feed_rate", 50.0))
 
-        btn_frame = Frame(dialog)
-        btn_frame.pack(fill=X, padx=10, pady=10)
+        Button(input_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var), bg="#4CAF50", fg="white").grid(row=5, column=1, sticky=E, padx=5, pady=10)
+        Button(input_frame, text=_("Cancel"), command=dialog.destroy).grid(row=5, column=2, sticky=W, padx=5, pady=10)
 
-        Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
-        Button(btn_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_entry, z_start_entry, z_min_entry, bltouch_z_entry, feed_rate_entry), bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
-
-    def run_measure_z_bitsetter(self, dialog, homing_entry, z_start_entry, z_min_entry, bltouch_z_entry, feed_rate_entry):
+    def run_measure_z_bitsetter(self, dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var):
         try:
-            homing_cmd = homing_entry.get().strip()
-            z_start = float(z_start_entry.get())
-            z_min = float(z_min_entry.get())
+            bs_x = float(homing_x_entry.get().strip())
+            bs_z = float(homing_z_entry.get().strip())
+            probe_depth = float(probe_depth_entry.get())
             self._bitsetter_bltouch_z = float(bltouch_z_entry.get())
             feed_rate = float(feed_rate_entry.get())
+            home_first = home_first_var.get()
         except ValueError:
             messagebox.showerror(_("Error"), _("Invalid numeric values"))
             return
@@ -2823,56 +2825,66 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         # Ensure the probe is retracted before starting homing/movements
         self._retract_probe("[MEASURE_Z_BITSETTER]")
 
-        Utils.setStr("SurfAlign", "bitsetter_homing", homing_cmd)
-        Utils.setFloat("SurfAlign", "bitsetter_z_start", z_start)
-        Utils.setFloat("SurfAlign", "bitsetter_z_min", z_min)
+        Utils.setStr("SurfAlign", "bitsetter_x", bs_x)
+        Utils.setStr("SurfAlign", "bitsetter_z", bs_z)
+        Utils.setFloat("SurfAlign", "bitsetter_probe_depth", probe_depth)
         Utils.setFloat("SurfAlign", "bitsetter_bltouch_z", self._bitsetter_bltouch_z)
         Utils.setFloat("SurfAlign", "bitsetter_feed_rate", feed_rate)
+        Utils.setInt("SurfAlign", "bitsetter_home_first", home_first)
         dialog.destroy()
 
         try:
-            start_wx = CNC.vars["wx"]
             start_wy = CNC.vars["wy"]
-            start_wz = CNC.vars["wz"]
         except KeyError:
             messagebox.showerror(_("Error"), _("Machine position not available."))
             return
 
-        print(f"Measure Z Bitsetter: WCS=({start_wx}, {start_wy}, {start_wz})")
+        print(f"Measure Z Bitsetter: X={bs_x}, Z={bs_z}")
 
-        # Apply user relative inputs to current WZ
-        wcs_z_start = start_wz + z_start
-        wcs_z_min = start_wz + z_min
-        
-        probe_points = [[start_wx, start_wy]]
-        x_off = 0.0
-        y_off = 0.0
-        z_off_field = 0.0
+
+        # Probe descends by probe_depth below the start position
+        wcs_z_min = bs_z - abs(probe_depth)
 
         original_xmin = self.app.gcode.probe.xmin
         original_ymin = self.app.gcode.probe.ymin
-        self.app.gcode.probe.xmin = start_wx
-        self.app.gcode.probe.ymin = start_wy
 
         try:
+            # Prepare jog commands to move to the bitsetter location
+            jog_lines = []
+            
+            if home_first:
+                jog_lines.append("$H") # Home the machine
+            else:
+                jog_lines.append("G53 G0 Z0") # Safety lift to Machine Z=0 (usually top) if not homing
+            
+            target_wy = start_wy
+            jog_lines.append(f"G53 G0 X{bs_x:.4f}") # Move to X
+            target_wx = bs_x
+            jog_lines.append(f"G53 G0 Z{bs_z:.4f}") # Move to Z safe height
+            probe_points = [[target_wx, target_wy]]
+            
+            # Temporarily set probe boundaries to include target
+            self.app.gcode.probe.xmin = min(original_xmin, target_wx)
+            self.app.gcode.probe.ymin = min(original_ymin, target_wy)
+            
             original_prbfeed = CNC.vars.get("prbfeed", 50.0)
             CNC.vars["prbfeed"] = feed_rate # Set the feed rate for the probe temporarily
             
             scan_lines = self.app.gcode.probe.multi_point_scan(
                 probe_points, 
-                wcs_z_min, 
-                wcs_z_start, 
-                x_off, 
-                y_off, 
-                z_off_field
+                bs_z, # start_z
+                wcs_z_min, # end_z
+                0.0, # x_off 
+                0.0, # y_off
+                0.0  # z_off_field
             )
             
             CNC.vars["prbfeed"] = original_prbfeed # Restore the feed rate for the probe
             
-            if homing_cmd:
-                scan_lines.insert(0, homing_cmd)
+            # Combine jog and scan lines
+            full_program = jog_lines + scan_lines
                 
-            self.app.run(scan_lines)
+            self.app.run(full_program)
             
             self.app.gcode.probe.xmin = original_xmin
             self.app.gcode.probe.ymin = original_ymin
@@ -2887,12 +2899,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
     def _poll_measure_z_bitsetter(self):
         if self.app.running or self.app.gcode.probe.is_multi_point_scan:
-             if self._measure_poll_count < 300:
+             if self._measure_poll_count < 1200:
                  self._measure_poll_count += 1
                  self.app.after(100, self._poll_measure_z_bitsetter)
                  return
              else:
-                 messagebox.showerror(_("Error"), _("Timeout waiting for probe."))
+                 messagebox.showerror(_("Error"), _("Timeout waiting for probe after 2 minutes"))
                  self.app.gcode.probe.is_multi_point_scan = False
                  return
 
