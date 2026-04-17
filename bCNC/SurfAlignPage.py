@@ -2567,22 +2567,33 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                             "then tighten it.\n\n"
                             f"Target: X{target_x:.4f} Y{target_y:.4f} Z{target_z:.4f}"))
 
-    def measure_z_offset_popup(self):
-        """Show popup to guide user for Z offset measurement."""
+    def measure_z_offset_popup(self, target_entry=None):
+        """Show popup to guide user for Z offset measurement.
+
+        Args:
+            target_entry: Optional widget whose .set() receives the result.
+                          When None (default) the result updates the global
+                          z_probe_to_tool_offset field as usual.
+        """
         dialog = Toplevel(self)
         dialog.title(_("Measure Z Offset"))
-        dialog.geometry("350x250")
+        dialog.geometry("350x260")
         dialog.resizable(False, False)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
         dialog.focus_set()
-        
+
         # Center dialog
         dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
 
         Label(dialog, text=_("1. Jog tool to touch the surface."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
         Label(dialog, text=_("2. Click 'Measure'."), justify=LEFT).pack(anchor=W, padx=10, pady=5)
         Label(dialog, text=_("Machine will lift to Max Z, move to XY offset,\nand probe to Min Z."), justify=LEFT, fg="gray").pack(anchor=W, padx=10, pady=5)
+
+        # When called from the calibrate popup, show a note about where result goes
+        if target_entry is not None:
+            Label(dialog, text=_("Result will be placed into 'Z Offset (Probe \u2192 Tip)' only.\nIt will NOT be saved to the main window."),
+                  justify=LEFT, fg="#1565C0", font=("TkDefaultFont", 8)).pack(anchor=W, padx=10, pady=(0, 3))
 
         # Min/Max Z Inputs
         input_frame = Frame(dialog)
@@ -2606,10 +2617,18 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         btn_frame.pack(fill=X, padx=10, pady=10)
 
         Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
-        Button(btn_frame, text=_("Measure"), command=lambda: self.run_measure_z(dialog, z_max_entry, z_min_entry), bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
+        Button(btn_frame, text=_("Measure"),
+               command=lambda: self.run_measure_z(dialog, z_max_entry, z_min_entry,
+                                                  target_entry=target_entry),
+               bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
 
-    def run_measure_z(self, dialog, z_max_entry, z_min_entry):
-        """Execute the Z offset measurement sequence using multi_point_scan."""
+    def run_measure_z(self, dialog, z_max_entry, z_min_entry, target_entry=None):
+        """Execute the Z offset measurement sequence using multi_point_scan.
+
+        Args:
+            target_entry: Optional widget to receive the result instead of
+                          the global z_probe_to_tool_offset field.
+        """
         try:
             user_z_max = float(z_max_entry.get())
             user_z_min = float(z_min_entry.get())
@@ -2623,7 +2642,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         # 0. Ensure probe is retracted before any movement
         self._retract_probe("[MEASURE_Z]")
 
-        # 1. Record current Machine Z (Tool Z)
+        # 1. Record current Machine Z (Tool Z) and store optional target
         try:
             self._measure_start_mz = CNC.vars["mz"]
             start_wx = CNC.vars["wx"]
@@ -2632,6 +2651,9 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         except KeyError:
             messagebox.showerror(_("Error"), _("Machine position not available."))
             return
+
+        # Remember where to write the result
+        self._measure_z_target_entry = target_entry
 
         # 2. Get XY Offsets from UI
         try:
@@ -2647,9 +2669,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         # 3. Setup arguments for multi_point_scan
         probe_points = [[start_wx, start_wy]]
-        
-        # Z depths
-        # Apply user relative inputs to current WZ
+
+        # Z depths – apply user relative inputs to current WZ
         mp_z_min = start_wz + user_z_min
         mp_z_max = start_wz + user_z_max
         
@@ -2705,52 +2726,57 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
 
     def _poll_measure_z(self):
-        """Check if probing finished (is_multi_point_scan became False)."""
+        """Check if probing finished (is_multi_point_scan became False).
+
+        Writes the calculated offset to self._measure_z_target_entry when it
+        is set (caller-supplied widget), otherwise writes to the global
+        z_probe_to_tool_offset field.
+        """
         # Polling: Check if busy or Probe is still in scanning mode
         # Probe class sets is_multi_point_scan=False when finished.
         if self.app.running or self.app.gcode.probe.is_multi_point_scan:
-             if self._measure_poll_count < 300: # 30 seconds timeout
-                 self._measure_poll_count += 1
-                 self.app.after(100, self._poll_measure_z)
-                 return
-             else:
-                 messagebox.showerror(_("Error"), _("Timeout waiting for probe."))
-                 # Ensure we reset flag if stuck?
-                 self.app.gcode.probe.is_multi_point_scan = False
-                 return
+            if self._measure_poll_count < 1200: # 120 seconds timeout
+                self._measure_poll_count += 1
+                self.app.after(100, self._poll_measure_z)
+                return
+            else:
+                messagebox.showerror(_("Error"), _("Timeout waiting for probe after 2 minutes."))
+                self.app.gcode.probe.is_multi_point_scan = False
+                return
 
         # Check for Alarm
         state = CNC.vars.get("state", "Idle")
         if state == "Alarm":
-             messagebox.showerror(_("Error"), _("Probing failed (Alarm state active)."))
-             return
+            messagebox.showerror(_("Error"), _("Probing failed (Alarm state active)."))
+            return
 
         # Check results in multi_probe_points
-        # Probe.add() stores results in self.multi_probe_points
         results = self.app.gcode.probe.multi_probe_points
         if results and len(results) > 0:
-             # Last point is the one we want (we only did one)
-             # Result is [x, y, z]
-             last_pt = results[-1]
-             prb_z = last_pt[2]
-             
-             # Offset = ProbeZ - ToolZ
-             # Use the ToolZ we recorded at start
-             # NOTE: prb_z from Probe class is the recorded contact point.
-             z_offset = prb_z - self._measure_start_mz
-             
-             self.z_probe_to_tool_offset.set(f"{z_offset:.4f}")
-             messagebox.showinfo(_("Measure Z"), _(f"Captured Offset: {z_offset:.4f}\n(Updated Field)"))
+            # Last point is the one we want (we only did one). Result is [x, y, z].
+            prb_z = results[-1][2]
+
+            # Offset = ProbeZ - ToolZ (ToolZ recorded at start)
+            z_offset = prb_z - self._measure_start_mz
+
+            target = getattr(self, "_measure_z_target_entry", None)
+            if target is not None:
+                # Write into the caller-supplied entry (e.g. tip_offset_entry in calibrate popup)
+                try:
+                    target.set(f"{z_offset:.4f}")
+                except Exception:
+                    pass
+                messagebox.showinfo(
+                    _("Measure Z"),
+                    _(f"Captured Offset: {z_offset:.4f}\n"
+                      "(Written to 'Z Offset (Probe \u2192 Tip)' \u2014 not saved to main window.)")
+                )
+            else:
+                # Normal path: update the global field
+                self.z_probe_to_tool_offset.set(f"{z_offset:.4f}")
+                messagebox.showinfo(_("Measure Z"), _(f"Captured Offset: {z_offset:.4f}\n(Updated Field)"))
         else:
-             print("Measure Z: No probe points recorded.")
-             # Fallback if Probe.add wasn't called (e.g. simulation mode without PRB feedback?)
-             # In simulation 'prbz' might not update or 'PRB:' response might not trigger add().
-             # We can try falling back to CNC.vars['prbz'] if available
-             try:
-                 # Check if 'prbz' is valid/recent? Hard to know.
-                 pass
-             except:
-                 pass
+            print("Measure Z: No probe points recorded.")
 
     def measure_z_offset_bitsetter_popup(self):
         """Show popup to guide user for Z offset measurement using Bitsetter."""
@@ -2914,6 +2940,13 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         )
         Label(f2, text=_("(abs. value used)"), fg="gray", font=("TkDefaultFont", 8)).grid(
             row=0, column=2, sticky=W, padx=4)
+        # Button re-uses measure_z_offset_popup; result goes into tip_offset_entry only
+        Button(
+            f2,
+            text=_("Measure Z Offset\u2026"),
+            command=lambda: self.measure_z_offset_popup(target_entry=tip_offset_entry),
+            bg="#4CAF50", fg="white", font=("TkDefaultFont", 8),
+        ).grid(row=1, column=0, columnspan=3, sticky=W, pady=(0, 4))
 
         # ── Buttons ───────────────────────────────────────────────────────────
         btn_frame = Frame(win)
