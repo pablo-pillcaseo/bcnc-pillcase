@@ -2796,12 +2796,23 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Label(input_frame, text=_("(mm downward from\nProbe Start Pos Z)"),
               justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=2, sticky=W, padx=5)
 
+        # Row 3: Calibrated BLTouch Pos + Calibrate button that opens a separate window
         Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=3, column=0, sticky=E)
         bltouch_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
         bltouch_z_entry.grid(row=3, column=1, padx=5, pady=2)
         bltouch_z_entry.set(Utils.getFloat("SurfAlign", "bitsetter_bltouch_z", -60.0))
         tkExtra.Balloon.set(bltouch_z_entry, _("Recorded Machine Z value of the calibrated BLTouch position touching the bitsetter."))
+        Button(
+            input_frame,
+            text=_("Calibrate"),
+            command=lambda: self.open_calibrate_bltouch_z_popup(
+                homing_x_entry, homing_z_entry, probe_depth_entry,
+                feed_rate_entry, home_first_var, bltouch_z_entry
+            ),
+            bg="#2196F3", fg="white"
+        ).grid(row=3, column=2, padx=5, pady=2, sticky=W)
 
+        # Row 4: Probe Feed Rate
         Label(input_frame, text=_("Probe Feed Rate:")).grid(row=4, column=0, sticky=E)
         feed_rate_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
         feed_rate_entry.grid(row=4, column=1, padx=5, pady=2)
@@ -2809,6 +2820,159 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         Button(input_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var), bg="#4CAF50", fg="white").grid(row=5, column=1, sticky=E, padx=5, pady=10)
         Button(input_frame, text=_("Cancel"), command=dialog.destroy).grid(row=5, column=2, sticky=W, padx=5, pady=10)
+
+    def open_calibrate_bltouch_z_popup(self, homing_x_entry, homing_z_entry, probe_depth_entry,
+                                        feed_rate_entry, home_first_var, bltouch_z_entry):
+        """Open a small dedicated window for calibrating the BLTouch Z position."""
+        win = Toplevel(self)
+        win.title(_("Calibrate BLTouch Z"))
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.focus_set()
+        win.geometry("+%d+%d" % (self.winfo_rootx() + 80, self.winfo_rooty() + 80))
+
+        f = Frame(win)
+        f.pack(fill=X, padx=15, pady=10)
+
+        Label(f, text=_("Enter the current Z distance from the BLTouch probe\n"
+                        "to the tool tip. The absolute value will be used."),
+              justify=LEFT, fg="gray").grid(row=0, column=0, columnspan=2, sticky=W, pady=(0, 8))
+
+        Label(f, text=_("Z Offset (Probe \u2192 Tip):")).grid(row=1, column=0, sticky=E)
+        tip_offset_entry = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
+        tip_offset_entry.grid(row=1, column=1, padx=5, pady=4)
+        tip_offset_entry.set(Utils.getFloat("SurfAlign", "bitsetter_bltouch_tip_offset", 0.0))
+        tkExtra.Balloon.set(tip_offset_entry, _("Current Z distance between the BLTouch probe and the tool tip. Absolute value will be used."))
+
+        btn_frame = Frame(win)
+        btn_frame.pack(fill=X, padx=15, pady=(0, 10))
+        Button(
+            btn_frame,
+            text=_("Take Measurement"),
+            command=lambda: self.run_measure_bltouch_cal_z(
+                homing_x_entry, homing_z_entry, probe_depth_entry,
+                feed_rate_entry, home_first_var,
+                tip_offset_entry, bltouch_z_entry
+            ),
+            bg="#2196F3", fg="white"
+        ).pack(side=LEFT)
+        Button(btn_frame, text=_("Close"), command=win.destroy).pack(side=RIGHT)
+
+    def run_measure_bltouch_cal_z(self, homing_x_entry, homing_z_entry, probe_depth_entry,
+                                   feed_rate_entry, home_first_var,
+                                   bltouch_tip_offset_entry, bltouch_z_entry):
+        """Jog to bitsetter XZ, probe it, then set Calibrated BLTouch Pos = probed_z + abs(tip_offset)."""
+        # Validate entries
+        try:
+            bs_x = float(homing_x_entry.get().strip())
+        except (ValueError, AttributeError):
+            messagebox.showerror(_("Error"), _("Probe Start X position is required. Please fill in the Probe start Pos (X,Z) fields."))
+            return
+        try:
+            bs_z = float(homing_z_entry.get().strip())
+        except (ValueError, AttributeError):
+            messagebox.showerror(_("Error"), _("Probe Start Z position is required. Please fill in the Probe start Pos (X,Z) fields."))
+            return
+        try:
+            probe_depth = float(probe_depth_entry.get())
+            feed_rate   = float(feed_rate_entry.get())
+            tip_offset  = abs(float(bltouch_tip_offset_entry.get()))
+            home_first  = home_first_var.get()
+        except ValueError:
+            messagebox.showerror(_("Error"), _("Invalid numeric values"))
+            return
+
+        # Save tip offset to config
+        Utils.setFloat("SurfAlign", "bitsetter_bltouch_tip_offset", float(bltouch_tip_offset_entry.get()))
+
+        # Retract probe before motion
+        self._retract_probe("[CALIBRATE_BLTOUCH_Z]")
+
+        wcs_z_min = bs_z - abs(probe_depth)
+
+        original_xmin = self.app.gcode.probe.xmin
+        original_ymin = self.app.gcode.probe.ymin
+
+        try:
+            start_wy = CNC.vars["wy"]
+        except KeyError:
+            messagebox.showerror(_("Error"), _("Machine position not available."))
+            return
+
+        try:
+            jog_lines = []
+            if home_first:
+                jog_lines.append("$H")
+            else:
+                jog_lines.append("G53 G0 Z0")
+            jog_lines.append(f"G53 G0 X{bs_x:.4f}")
+            jog_lines.append(f"G53 G0 Z{bs_z:.4f}")
+
+            probe_points = [[bs_x, start_wy]]
+            self.app.gcode.probe.xmin = min(original_xmin, bs_x)
+            self.app.gcode.probe.ymin = min(original_ymin, start_wy)
+
+            original_prbfeed = CNC.vars.get("prbfeed", 50.0)
+            CNC.vars["prbfeed"] = feed_rate
+
+            scan_lines = self.app.gcode.probe.multi_point_scan(
+                probe_points,
+                bs_z,        # start_z
+                wcs_z_min,   # end_z
+                0.0, 0.0, 0.0
+            )
+
+            CNC.vars["prbfeed"] = original_prbfeed
+
+            full_program = jog_lines + scan_lines
+            self.app.run(full_program)
+
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+
+            # Store the tip_offset so the poll callback can use it
+            self._cal_blt_tip_offset = tip_offset
+            self._cal_blt_z_entry    = bltouch_z_entry
+            self._cal_blt_poll_count = 0
+            self.app.after(1000, self._poll_cal_bltouch_z)
+
+        except Exception as e:
+            self.app.gcode.probe.xmin = original_xmin
+            self.app.gcode.probe.ymin = original_ymin
+            messagebox.showerror(_("Error"), f"Failed to run bitsetter calibration probe: {e}")
+
+    def _poll_cal_bltouch_z(self):
+        """Poll for bitsetter calibration probe completion, then update Calibrated BLTouch Pos."""
+        if self.app.running or self.app.gcode.probe.is_multi_point_scan:
+            if self._cal_blt_poll_count < 1200:  # 2-minute timeout
+                self._cal_blt_poll_count += 1
+                self.app.after(100, self._poll_cal_bltouch_z)
+                return
+            else:
+                messagebox.showerror(_("Error"), _("Timeout waiting for calibration probe after 2 minutes"))
+                self.app.gcode.probe.is_multi_point_scan = False
+                return
+
+        state = CNC.vars.get("state", "Idle")
+        if state == "Alarm":
+            messagebox.showerror(_("Error"), _("Probing failed (Alarm state active)."))
+            return
+
+        results = self.app.gcode.probe.multi_probe_points
+        if results and len(results) > 0:
+            prb_z = results[-1][2]  # WCS Z at contact
+            # Calibrated BLTouch Pos = probed Z + abs(probe-to-tip offset)
+            cal_z = prb_z + self._cal_blt_tip_offset
+            self._cal_blt_z_entry.set(f"{cal_z:.4f}")
+            messagebox.showinfo(
+                _("Calibration Complete"),
+                _(f"Probed Z: {prb_z:.4f}\n"
+                  f"Tip Offset (abs): {self._cal_blt_tip_offset:.4f}\n"
+                  f"Calibrated BLTouch Pos set to: {cal_z:.4f}")
+            )
+        else:
+            messagebox.showerror(_("Error"), _("No probe points recorded during calibration."))
 
     def run_measure_z_bitsetter(self, dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var):
         try:
