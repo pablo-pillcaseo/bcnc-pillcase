@@ -2917,12 +2917,6 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             variable=local_home_first_var,
         ).grid(row=4, column=1, sticky=W, pady=(2, 6))
 
-        # Row 5 – Calibrated BLTouch Z (read-only preview; updated after measurement)
-        Label(f, text=_("Calibrated BLTouch Pos (Z):")).grid(row=5, column=0, **col_lbl)
-        local_bltouch_z = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
-        local_bltouch_z.grid(row=5, column=1, **col_ent)
-        local_bltouch_z.set(bltouch_z_entry.get())
-        tkExtra.Balloon.set(local_bltouch_z, _("Current Calibrated BLTouch Z value. Will be updated here after 'Take Measurement' (local copy — not saved to main window)."))
 
         # ── Separator ─────────────────────────────────────────────────────────
         Frame(win, height=1, bd=0, relief="flat", bg="#BDBDBD").pack(fill=X, padx=15, pady=(0, 6))
@@ -2957,7 +2951,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             command=lambda: self.run_measure_bltouch_cal_z(
                 local_homing_x, local_homing_z, local_probe_depth,
                 local_feed_rate, local_home_first_var,
-                tip_offset_entry, local_bltouch_z
+                tip_offset_entry, bltouch_z_entry
             ),
             bg="#2196F3", fg="white"
         ).pack(side=LEFT)
