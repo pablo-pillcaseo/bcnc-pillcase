@@ -2828,8 +2828,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """Show popup to guide user for Z offset measurement using Bitsetter."""
         dialog = Toplevel(self)
         dialog.title(_("Measure Z Offset (Bitsetter)"))
-        dialog.geometry("420x280")
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
         dialog.focus_set()
