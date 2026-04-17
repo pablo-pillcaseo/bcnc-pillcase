@@ -2823,7 +2823,12 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
     def open_calibrate_bltouch_z_popup(self, homing_x_entry, homing_z_entry, probe_depth_entry,
                                         feed_rate_entry, home_first_var, bltouch_z_entry):
-        """Open a small dedicated window for calibrating the BLTouch Z position."""
+        """Open a small dedicated window for calibrating the BLTouch Z position.
+
+        All fields are pre-filled from the parent dialog and are editable here,
+        but changes are LOCAL to this popup only — they do not propagate back to
+        the main window and are not saved to config.
+        """
         win = Toplevel(self)
         win.title(_("Calibrate BLTouch Z"))
         win.resizable(False, False)
@@ -2832,28 +2837,94 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         win.focus_set()
         win.geometry("+%d+%d" % (self.winfo_rootx() + 80, self.winfo_rooty() + 80))
 
+        # ── Info banner ───────────────────────────────────────────────────────
+        info_frame = Frame(win, bd=1, relief="solid", bg="#FFF9C4")
+        info_frame.pack(fill=X, padx=15, pady=(10, 4))
+        Label(
+            info_frame,
+            text=_("ℹ  Values below are loaded from the parent dialog.\n"
+                   "   You may edit them here to verify before measuring.\n"
+                   "   Changes will NOT be saved back to the main window."),
+            justify=LEFT, fg="#5D4037", bg="#FFF9C4",
+            font=("TkDefaultFont", 8),
+        ).pack(anchor=W, padx=6, pady=4)
+
+        # ── Main fields ───────────────────────────────────────────────────────
         f = Frame(win)
-        f.pack(fill=X, padx=15, pady=10)
+        f.pack(fill=X, padx=15, pady=6)
 
-        Label(f, text=_("Enter the current Z distance from the BLTouch probe\n"
-                        "to the tool tip. The absolute value will be used."),
-              justify=LEFT, fg="gray").grid(row=0, column=0, columnspan=2, sticky=W, pady=(0, 8))
+        col_lbl = {"sticky": "E", "padx": (0, 4)}
+        col_ent = {"sticky": "W", "padx": (0, 8), "pady": 3}
 
-        Label(f, text=_("Z Offset (Probe \u2192 Tip):")).grid(row=1, column=0, sticky=E)
-        tip_offset_entry = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        tip_offset_entry.grid(row=1, column=1, padx=5, pady=4)
+        # Row 0 – Probe Start X
+        Label(f, text=_("Probe Start X (Machine):")).grid(row=0, column=0, **col_lbl)
+        local_homing_x = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        local_homing_x.grid(row=0, column=1, **col_ent)
+        local_homing_x.set(homing_x_entry.get())
+        tkExtra.Balloon.set(local_homing_x, _("Machine X coordinate to jog to before probing (local copy — not saved)."))
+
+        # Row 1 – Probe Start Z
+        Label(f, text=_("Probe Start Z (Machine):")).grid(row=1, column=0, **col_lbl)
+        local_homing_z = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        local_homing_z.grid(row=1, column=1, **col_ent)
+        local_homing_z.set(homing_z_entry.get())
+        tkExtra.Balloon.set(local_homing_z, _("Machine Z safe height to jog to before probing (local copy — not saved)."))
+
+        # Row 2 – Probe Depth
+        Label(f, text=_("Probe Depth (mm):")).grid(row=2, column=0, **col_lbl)
+        local_probe_depth = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        local_probe_depth.grid(row=2, column=1, **col_ent)
+        local_probe_depth.set(probe_depth_entry.get())
+        tkExtra.Balloon.set(local_probe_depth, _("How far to descend from Probe Start Z during the calibration probe (local copy — not saved)."))
+
+        # Row 3 – Feed Rate
+        Label(f, text=_("Probe Feed Rate (mm/min):")).grid(row=3, column=0, **col_lbl)
+        local_feed_rate = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        local_feed_rate.grid(row=3, column=1, **col_ent)
+        local_feed_rate.set(feed_rate_entry.get())
+        tkExtra.Balloon.set(local_feed_rate, _("Feed rate for the calibration probe move (local copy — not saved)."))
+
+        # Row 4 – Home First checkbox
+        local_home_first_var = IntVar(value=home_first_var.get())
+        Checkbutton(
+            f, text=_("Home ($H) first"),
+            variable=local_home_first_var,
+        ).grid(row=4, column=1, sticky=W, pady=(2, 6))
+
+        # Row 5 – Calibrated BLTouch Z (read-only preview; updated after measurement)
+        Label(f, text=_("Calibrated BLTouch Pos (Z):")).grid(row=5, column=0, **col_lbl)
+        local_bltouch_z = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        local_bltouch_z.grid(row=5, column=1, **col_ent)
+        local_bltouch_z.set(bltouch_z_entry.get())
+        tkExtra.Balloon.set(local_bltouch_z, _("Current Calibrated BLTouch Z value. Will be updated here after 'Take Measurement' (local copy — not saved to main window)."))
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        Frame(win, height=1, bd=0, relief="flat", bg="#BDBDBD").pack(fill=X, padx=15, pady=(0, 6))
+
+        # Row 6 – Z Offset Probe→Tip (the primary editable field)
+        f2 = Frame(win)
+        f2.pack(fill=X, padx=15)
+        Label(f2, text=_("Z Offset (Probe → Tip):")).grid(row=0, column=0, sticky=E, padx=(0, 4))
+        tip_offset_entry = tkExtra.FloatEntry(f2, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        tip_offset_entry.grid(row=0, column=1, sticky=W, pady=4)
         tip_offset_entry.set(Utils.getFloat("SurfAlign", "bitsetter_bltouch_tip_offset", 0.0))
-        tkExtra.Balloon.set(tip_offset_entry, _("Current Z distance between the BLTouch probe and the tool tip. Absolute value will be used."))
+        tkExtra.Balloon.set(
+            tip_offset_entry,
+            _("Z distance from BLTouch probe to tool tip. The absolute value will be used.")
+        )
+        Label(f2, text=_("(abs. value used)"), fg="gray", font=("TkDefaultFont", 8)).grid(
+            row=0, column=2, sticky=W, padx=4)
 
+        # ── Buttons ───────────────────────────────────────────────────────────
         btn_frame = Frame(win)
-        btn_frame.pack(fill=X, padx=15, pady=(0, 10))
+        btn_frame.pack(fill=X, padx=15, pady=(8, 12))
         Button(
             btn_frame,
             text=_("Take Measurement"),
             command=lambda: self.run_measure_bltouch_cal_z(
-                homing_x_entry, homing_z_entry, probe_depth_entry,
-                feed_rate_entry, home_first_var,
-                tip_offset_entry, bltouch_z_entry
+                local_homing_x, local_homing_z, local_probe_depth,
+                local_feed_rate, local_home_first_var,
+                tip_offset_entry, local_bltouch_z
             ),
             bg="#2196F3", fg="white"
         ).pack(side=LEFT)
