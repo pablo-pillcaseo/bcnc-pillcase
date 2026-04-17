@@ -2577,8 +2577,11 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """
         dialog = Toplevel(self)
         dialog.title(_("Measure Z Offset"))
-        dialog.geometry("350x260")
-        dialog.resizable(False, False)
+        if target_entry is not None:
+            dialog.geometry("350x410")
+        else:
+            dialog.geometry("350x370")
+        dialog.resizable(True, True)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
         dialog.focus_set()
@@ -2586,32 +2589,63 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         # Center dialog
         dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
 
-        Label(dialog, text=_("1. Jog tool to touch the surface."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
+        Label(dialog, text=_("1. Jog tool to touch a point on the surface of the lid."), justify=LEFT).pack(anchor=W, padx=10, pady=(10, 5))
         Label(dialog, text=_("2. Click 'Measure'."), justify=LEFT).pack(anchor=W, padx=10, pady=5)
-        Label(dialog, text=_("Machine will lift to Max Z, move to XY offset,\nand probe to Min Z."), justify=LEFT, fg="gray").pack(anchor=W, padx=10, pady=5)
+        Label(dialog, text=_("Machine will lift by Safe Lift, move to the XY Offset position,\nand probe down by Probe Depth."), justify=LEFT, fg="gray").pack(anchor=W, padx=10, pady=5)
 
         # When called from the calibrate popup, show a note about where result goes
         if target_entry is not None:
             Label(dialog, text=_("Result will be placed into 'Z Offset (Probe \u2192 Tip)' only.\nIt will NOT be saved to the main window."),
                   justify=LEFT, fg="#1565C0", font=("TkDefaultFont", 8)).pack(anchor=W, padx=10, pady=(0, 3))
 
-        # Min/Max Z Inputs
-        input_frame = Frame(dialog)
-        input_frame.pack(fill=X, padx=10, pady=5)
-        
-        Label(input_frame, text=_("Z Max (Safe):")).grid(row=0, column=0, sticky=E)
+        # Min/Max Z Inputs — grouped in a LabelFrame
+        z_group = LabelFrame(dialog, text=_("Probe Range"), padx=6, pady=4)
+        z_group.pack(fill=X, padx=10, pady=5)
+
+        input_frame = Frame(z_group)
+        input_frame.pack(fill=X)
+
+        Label(input_frame, text=_("Safe Lift:")).grid(row=0, column=0, sticky=E)
         z_max_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         z_max_entry.grid(row=0, column=1, padx=5)
-        z_max_entry.set(5.0) # Default relative lift
+        z_max_entry.set(5.0) # Default relative lift (positive = upward)
+        tkExtra.Balloon.set(z_max_entry, _("Distance (mm) to lift the probe above the surface contact point\nbefore moving to the probe XY location. Absolute value is used."))
+        Label(input_frame, text=_("mm"), fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=1, sticky=W, padx=5)
 
-        Label(input_frame, text=_("Z Min (Probe):")).grid(row=0, column=2, sticky=E)
+        Label(input_frame, text=_("Probe Depth:")).grid(row=0, column=2, sticky=E)
         z_min_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
         z_min_entry.grid(row=0, column=3, padx=5)
-        z_min_entry.set(-10.0) # Default relative probe depth
+        z_min_entry.set(10.0) # Default relative probe depth (positive = downward)
+        tkExtra.Balloon.set(z_min_entry, _("Distance (mm) to descend below the surface contact point\nwhen probing. Absolute value is used."))
+        Label(input_frame, text=_("mm"), fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=3, sticky=W, padx=5)
 
-        # Explanatory text
-        Label(dialog, text=_("Z values are relative to the current\ntool position (surface contact point)."), 
-              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).pack(anchor=W, padx=10, pady=(0, 5))
+        # Explanatory text — grid row 2
+        Label(input_frame, text=_("Both fields above are relative to the current tool position\n(surface contact point). Absolute value is used for each."),
+              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=2, column=0, columnspan=4, sticky=W, padx=2, pady=(4, 2))
+
+        # Local XY offset fields — separate group outside Probe Range
+        xy_group = LabelFrame(dialog, text=_("XY Offset (local — not saved)"), padx=6, pady=4)
+        xy_group.pack(fill=X, padx=10, pady=(0, 5))
+
+        xy_frame = Frame(xy_group)
+        xy_frame.pack(fill=X)
+
+        Label(xy_frame, text=_("X Offset:")).grid(row=0, column=0, sticky=E, pady=2)
+        local_x_offset = tkExtra.FloatEntry(xy_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        local_x_offset.grid(row=0, column=1, padx=5, pady=2)
+        local_x_offset.set(self.x_probe_to_tool_offset.get() or "0")
+        tkExtra.Balloon.set(local_x_offset, _("X distance from tool tip to probe tip.\nLoaded from main window — editable here for this measurement only.\nChanges will NOT be saved back to the main window."))
+
+        Label(xy_frame, text=_("Y Offset:")).grid(row=0, column=2, sticky=E, pady=2)
+        local_y_offset = tkExtra.FloatEntry(xy_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
+        local_y_offset.grid(row=0, column=3, padx=5, pady=2)
+        local_y_offset.set(self.y_probe_to_tool_offset.get() or "0")
+        tkExtra.Balloon.set(local_y_offset, _("Y distance from tool tip to probe tip.\nLoaded from main window — editable here for this measurement only.\nChanges will NOT be saved back to the main window."))
+
+        Label(xy_frame, text=_("mm"), fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=1, sticky=W, padx=5)
+
+
+        Label(xy_frame, text=_("mm"), fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=3, sticky=W, padx=5)
 
         btn_frame = Frame(dialog)
         btn_frame.pack(fill=X, padx=10, pady=10)
@@ -2619,15 +2653,22 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Button(btn_frame, text=_("Cancel"), command=dialog.destroy).pack(side=RIGHT)
         Button(btn_frame, text=_("Measure"),
                command=lambda: self.run_measure_z(dialog, z_max_entry, z_min_entry,
-                                                  target_entry=target_entry),
+                                                  target_entry=target_entry,
+                                                  local_x_offset=local_x_offset,
+                                                  local_y_offset=local_y_offset),
                bg="#4CAF50", fg="white").pack(side=RIGHT, padx=10)
 
-    def run_measure_z(self, dialog, z_max_entry, z_min_entry, target_entry=None):
+    def run_measure_z(self, dialog, z_max_entry, z_min_entry, target_entry=None,
+                      local_x_offset=None, local_y_offset=None):
         """Execute the Z offset measurement sequence using multi_point_scan.
 
         Args:
-            target_entry: Optional widget to receive the result instead of
-                          the global z_probe_to_tool_offset field.
+            target_entry:    Optional widget to receive the result instead of
+                             the global z_probe_to_tool_offset field.
+            local_x_offset:  Optional local-only FloatEntry for X probe offset.
+                             When supplied, its value is used instead of the
+                             global x_probe_to_tool_offset field (not written back).
+            local_y_offset:  Same as local_x_offset but for Y.
         """
         try:
             user_z_max = float(z_max_entry.get())
@@ -2655,14 +2696,19 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         # Remember where to write the result
         self._measure_z_target_entry = target_entry
 
-        # 2. Get XY Offsets from UI
+        # 2. Get XY Offsets – prefer local popup entries (not saved back to main window)
         try:
-            x_off = float(self.x_probe_to_tool_offset.get() or 0)
-            y_off = float(self.y_probe_to_tool_offset.get() or 0)
+            x_val = local_x_offset.get().strip()
+            y_val = local_y_offset.get().strip()
+            if not x_val or not y_val:
+                messagebox.showerror(_("Error"), _("X and Y Offsets are required. Please enter values or cancel."))
+                return
+            x_off = float(x_val)
+            y_off = float(y_val)
             # Z Offset ignored as per instruction: "pass it as zero"
             z_off_field = 0.0 
-        except ValueError:
-            messagebox.showerror(_("Error"), _("Invalid Offset Values"))
+        except (ValueError, AttributeError):
+            messagebox.showerror(_("Error"), _("Invalid or missing Offset Values"))
             return
 
         print(f"Measure Z: WCS=({start_wx}, {start_wy}, {start_wz}), OffsetXY=({x_off}, {y_off})")
@@ -2671,8 +2717,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         probe_points = [[start_wx, start_wy]]
 
         # Z depths – apply user relative inputs to current WZ
-        mp_z_min = start_wz + user_z_min
-        mp_z_max = start_wz + user_z_max
+        mp_z_min = start_wz - abs(user_z_min)  # depth is positive; subtract to go downward
+        mp_z_max = start_wz + abs(user_z_max)  # lift is positive; add to go upward
         
         # 4. Handle xmin/ymin side-effect of multi_point_scan
         original_xmin = self.app.gcode.probe.xmin
@@ -2794,38 +2840,40 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         input_frame = Frame(dialog)
         input_frame.pack(fill=X, padx=10, pady=5)
         
-        Label(input_frame, text=_("Probe start Pos (X,Z):")).grid(row=0, column=0, sticky=E)
-        pos_frame = Frame(input_frame)
-        pos_frame.grid(row=0, column=1, sticky=W)
-        
-        homing_x_entry = tkExtra.FloatEntry(pos_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
-        homing_x_entry.pack(side=LEFT)
+        # Row 0 – Probe Start X
+        Label(input_frame, text=_("Probe Start X:")).grid(row=0, column=0, sticky=E, pady=(0, 2))
+        homing_x_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        homing_x_entry.grid(row=0, column=1, padx=5, pady=(0, 2), sticky=W)
         homing_x_entry.set(Utils.getStr("SurfAlign", "bitsetter_x", ""))
-        tkExtra.Balloon.set(homing_x_entry, _("Machine X coordinate to jog to before probing, Bitsetter position"))
+        tkExtra.Balloon.set(homing_x_entry, _("Machine X coordinate to jog to before probing (Bitsetter position)"))
 
-        homing_z_entry = tkExtra.FloatEntry(pos_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=8)
-        homing_z_entry.pack(side=LEFT, padx=(5, 0))
+        # Row 1 – Probe Start Z
+        Label(input_frame, text=_("Probe Start Z:")).grid(row=1, column=0, sticky=E, pady=(0, 2))
+        homing_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
+        homing_z_entry.grid(row=1, column=1, padx=5, pady=(0, 2), sticky=W)
         homing_z_entry.set(Utils.getStr("SurfAlign", "bitsetter_z", ""))
-        tkExtra.Balloon.set(homing_z_entry, _("Machine Z (Safe height) to jog to before probing"))
+        tkExtra.Balloon.set(homing_z_entry, _("Machine Z safe height to jog to before probing"))
 
-        home_first_var = IntVar()
-        home_first_var.set(Utils.getInt("SurfAlign", "bitsetter_home_first", 1))
-        Checkbutton(input_frame, text=_("Home ($H) first"), variable=home_first_var).grid(row=2, column=1, sticky=W, pady=(5, 0))
-
-        Label(input_frame, text=_("Probe Depth:")).grid(row=1, column=0, sticky=E, pady=(10, 2))
+        # Row 2 – Probe Depth
+        Label(input_frame, text=_("Probe Depth:")).grid(row=2, column=0, sticky=E, pady=(10, 2))
         probe_depth_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        probe_depth_entry.grid(row=1, column=1, padx=5, pady=(10, 2))
+        probe_depth_entry.grid(row=2, column=1, padx=5, pady=(10, 2))
         probe_depth_entry.set(Utils.getFloat("SurfAlign", "bitsetter_probe_depth", 10.0))
         tkExtra.Balloon.set(probe_depth_entry, _("How far (mm) to descend from the Probe Start Z position"))
 
         # Explanatory text on the right
-        Label(input_frame, text=_("(mm downward from\nProbe Start Pos Z)"),
-              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=1, column=2, sticky=W, padx=5)
+        Label(input_frame, text=_("(mm downward from\nProbe Start Z)"),
+              justify=LEFT, fg="gray", font=("TkDefaultFont", 8)).grid(row=2, column=2, sticky=W, padx=5)
 
-        # Row 3: Calibrated BLTouch Pos + Calibrate button that opens a separate window
-        Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=3, column=0, sticky=E)
+        # Row 3 – Home First checkbox
+        home_first_var = IntVar()
+        home_first_var.set(Utils.getInt("SurfAlign", "bitsetter_home_first", 1))
+        Checkbutton(input_frame, text=_("Home ($H) first"), variable=home_first_var).grid(row=3, column=1, sticky=W, pady=(5, 0))
+
+        # Row 4: Calibrated BLTouch Pos + Calibrate button that opens a separate window
+        Label(input_frame, text=_("Calibrated BLTouch Pos (Z):")).grid(row=4, column=0, sticky=E)
         bltouch_z_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        bltouch_z_entry.grid(row=3, column=1, padx=5, pady=2)
+        bltouch_z_entry.grid(row=4, column=1, padx=5, pady=2)
         bltouch_z_entry.set(Utils.getFloat("SurfAlign", "bitsetter_bltouch_z", -60.0))
         tkExtra.Balloon.set(bltouch_z_entry, _("Recorded Machine Z value of the calibrated BLTouch position touching the bitsetter."))
         Button(
@@ -2836,16 +2884,16 @@ class MultiPointProbe(CNCRibbon.PageFrame):
                 feed_rate_entry, home_first_var, bltouch_z_entry
             ),
             bg="#2196F3", fg="white"
-        ).grid(row=3, column=2, padx=5, pady=2, sticky=W)
+        ).grid(row=4, column=2, padx=5, pady=2, sticky=W)
 
-        # Row 4: Probe Feed Rate
-        Label(input_frame, text=_("Probe Feed Rate:")).grid(row=4, column=0, sticky=E)
+        # Row 5: Probe Feed Rate
+        Label(input_frame, text=_("Probe Feed Rate:")).grid(row=5, column=0, sticky=E)
         feed_rate_entry = tkExtra.FloatEntry(input_frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=15)
-        feed_rate_entry.grid(row=4, column=1, padx=5, pady=2)
+        feed_rate_entry.grid(row=5, column=1, padx=5, pady=2)
         feed_rate_entry.set(Utils.getFloat("SurfAlign", "bitsetter_feed_rate", 50.0))
 
-        Button(input_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var), bg="#4CAF50", fg="white").grid(row=5, column=1, sticky=E, padx=5, pady=10)
-        Button(input_frame, text=_("Cancel"), command=dialog.destroy).grid(row=5, column=2, sticky=W, padx=5, pady=10)
+        Button(input_frame, text=_("Measure"), command=lambda: self.run_measure_z_bitsetter(dialog, homing_x_entry, homing_z_entry, probe_depth_entry, bltouch_z_entry, feed_rate_entry, home_first_var), bg="#4CAF50", fg="white").grid(row=6, column=1, sticky=E, padx=5, pady=10)
+        Button(input_frame, text=_("Cancel"), command=dialog.destroy).grid(row=6, column=2, sticky=W, padx=5, pady=10)
 
     def open_calibrate_bltouch_z_popup(self, homing_x_entry, homing_z_entry, probe_depth_entry,
                                         feed_rate_entry, home_first_var, bltouch_z_entry):
@@ -2883,14 +2931,14 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         col_ent = {"sticky": "W", "padx": (0, 8), "pady": 3}
 
         # Row 0 – Probe Start X
-        Label(f, text=_("Probe Start X (Machine):")).grid(row=0, column=0, **col_lbl)
+        Label(f, text=_("Probe Start X:")).grid(row=0, column=0, **col_lbl)
         local_homing_x = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
         local_homing_x.grid(row=0, column=1, **col_ent)
         local_homing_x.set(homing_x_entry.get())
         tkExtra.Balloon.set(local_homing_x, _("Machine X coordinate to jog to before probing (local copy — not saved)."))
 
         # Row 1 – Probe Start Z
-        Label(f, text=_("Probe Start Z (Machine):")).grid(row=1, column=0, **col_lbl)
+        Label(f, text=_("Probe Start Z:")).grid(row=1, column=0, **col_lbl)
         local_homing_z = tkExtra.FloatEntry(f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=12)
         local_homing_z.grid(row=1, column=1, **col_ent)
         local_homing_z.set(homing_z_entry.get())
