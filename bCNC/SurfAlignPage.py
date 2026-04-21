@@ -3063,8 +3063,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
             scan_lines = self.app.gcode.probe.multi_point_scan(
                 probe_points,
-                bs_z,        # start_z
                 wcs_z_min,   # end_z
+                bs_z,        # start_z
                 0.0, 0.0, 0.0
             )
 
@@ -3181,8 +3181,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             
             scan_lines = self.app.gcode.probe.multi_point_scan(
                 probe_points, 
-                bs_z, # start_z
                 wcs_z_min, # end_z
+                bs_z, # start_z
                 0.0, # x_off 
                 0.0, # y_off
                 0.0  # z_off_field
