@@ -1029,16 +1029,21 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 sku_raw = node.get("sku", "")
                 sku_prefix = sku_raw
                 
+                best_match_name = None
+                best_match_len = -1
+                best_match_keyword = ""
+                
                 for cat, items_list in sku_data.get("cases", {}).items():
-                    found = False
                     for item in items_list:
                         kw = item.get("keyword")
-                        if kw and sku_raw.startswith(kw):
-                            sku_prefix = item.get("name")
-                            found = True
-                            break
-                    if found:
-                        break
+                        if kw and (sku_raw == kw or sku_raw.startswith(kw + "-")):
+                            if len(kw) > best_match_len:
+                                best_match_len = len(kw)
+                                best_match_name = item.get("name")
+                                best_match_keyword = kw
+                                
+                if best_match_name:
+                    sku_prefix = best_match_name
                 name = node.get("product_name", "Unknown")
                 custom = node.get("custom_options") or {}
                 # Custom options can be a list or a dict depending on API version/setup
@@ -1064,9 +1069,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                                 engraving_parts.append((str(opt_val), str(color)))
                 if engraving_parts:
                     for part, color in engraving_parts:
-                        items_to_show.append((name, part, color, sku_prefix))
+                        items_to_show.append((name, part, color, sku_prefix, sku_raw, best_match_keyword))
                 else:
-                    items_to_show.append((name, "", "", sku_prefix))
+                    items_to_show.append((name, "", "", sku_prefix, sku_raw, best_match_keyword))
 
             if not items_to_show:
                 messagebox.showinfo(_("ShipHero"), _("Order found but no line items available."))
@@ -1225,7 +1230,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tree.heading("Product", text=_("Product Name"))
         tree.heading("Engraving", text=_("Engraving Text"))
         tree.heading("Color", text=_("Color"))
-        tree.heading("CaseType", text=_("Case Type"))
+        tree.heading("CaseType", text=_("Mapped Lid"))
         tree.column("Product", width=250)
         tree.column("Engraving", width=100)
         tree.column("Color", width=100)
@@ -1239,22 +1244,43 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         
         tree.tag_configure('unmapped', background='#ffcccc')
         
-        def get_mapping():
-            mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
-            try:
-                return json.loads(mapping_str)
-            except Exception:
-                return {}
+        def get_mapped_lid(sku_raw):
+            if not sku_raw:
+                return None
+            if not hasattr(self, "_lid_defaults"):
+                self._lid_defaults = self._load_lid_defaults()
+            best_lid = None
+            best_len = -1
+            sku_lower = sku_raw.lower()
+            
+            for lid_name, cfg in self._lid_defaults.items():
+                if isinstance(cfg, dict):
+                    kw = cfg.get("skuKeyword")
+                    if kw and kw.strip():
+                        kw_lower = kw.strip().lower()
+                        if sku_lower == kw_lower or sku_lower.startswith(kw_lower + "-"):
+                            if len(kw_lower) > best_len:
+                                best_len = len(kw_lower)
+                                best_lid = lid_name
+                                
+            return best_lid
 
         def refresh_tree():
             for item in tree.get_children():
                 tree.delete(item)
-            mapping = get_mapping()
-            for name, engraving, color, case_type in items:
+            for item_tuple in items:
+                name = item_tuple[0]
+                engraving = item_tuple[1]
+                color = item_tuple[2]
+                sku_raw = item_tuple[4] if len(item_tuple) > 4 else ""
+                
                 tag = ()
-                if name not in mapping:
+                mapped_lid = get_mapped_lid(sku_raw)
+                if not mapped_lid:
                     tag = ('unmapped',)
-                tree.insert("", END, values=(name, engraving, color, case_type), tags=tag)
+                
+                display_lid = mapped_lid if mapped_lid else "Unmapped"
+                tree.insert("", END, values=(name, engraving, color, display_lid, sku_raw), tags=tag)
 
         refresh_tree()
 
@@ -1264,17 +1290,16 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 item_values = tree.item(selected[0])['values']
                 name_val = item_values[0]
                 eng_val = item_values[1]
+                display_lid = item_values[3]
                 
-                mapping = get_mapping()
-                if name_val not in mapping:
-                    messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to a Lid Name. Please map it first."), parent=popup)
+                if not display_lid or display_lid == "Unmapped":
+                    messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to any Lid Name via SKU Keyword. Please select one from the dropdown or configure it in Lids & Defaults."), parent=popup)
                     return
+                mapped_lid = display_lid
                     
                 if not eng_val or eng_val == "None":
                     messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
                     return
-                
-                mapped_lid = mapping[name_val]
                 
                 self.engraveText.set(str(eng_val))
                 self.lidName.set(mapped_lid)
@@ -1288,25 +1313,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         tree.bind("<Double-1>", on_select) # Double click to select
         
-        # Inline Combobox logic
-        import os
-        import json
-        
-        case_types = []
-        try:
-            sku_path = os.path.join(os.path.dirname(__file__), "skuData.json")
-            with open(sku_path, "r", encoding="utf-8") as f:
-                sku_data = json.load(f)
-                for category, items in sku_data.get("cases", {}).items():
-                    for item in items:
-                        if "name" in item:
-                            case_types.append(item["name"])
-        except Exception as e:
-            print(f"Error loading skuData.json: {e}")
-            messagebox.showwarning(_("Warning"), _("Error loading skuData.json:\n{}").format(e))
-            case_types = ["Case Type 1", "Case Type 2", "Case Type 3", "Case Type 4"]
-
-        combo = ttk.Combobox(frame, values=case_types, state="readonly")
+        # Inline Combobox logic (allow manual override with any Lid)
+        lid_names = list(self.lid_list) if hasattr(self, 'lid_list') else []
+        combo = ttk.Combobox(frame, values=lid_names, state="readonly")
         
         def on_click(event):
             region = tree.identify_region(event.x, event.y)
@@ -1328,7 +1337,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             combo.place(x=x, y=y, width=width, height=height)
             
             current_value = tree.set(item_id, "CaseType")
-            if current_value in case_types:
+            if current_value in lid_names:
                 combo.set(current_value)
             else:
                 combo.set("")
@@ -1340,12 +1349,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if item_id:
                 new_value = combo.get()
                 tree.set(item_id, "CaseType", new_value)
-                
-                try:
-                    idx = tree.index(item_id)
-                    items[idx] = (items[idx][0], items[idx][1], items[idx][2], new_value)
-                except Exception:
-                    pass
 
             combo.place_forget()
 
@@ -1353,12 +1356,45 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         combo.bind("<FocusOut>", lambda e: combo.place_forget())
         tree.bind("<ButtonRelease-1>", on_click)
         
+        def show_details():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo(_("Details"), _("Please select an item first."), parent=popup)
+                return
+            
+            item_id = selected[0]
+            try:
+                idx = tree.index(item_id)
+                original_item = items[idx]
+            except Exception:
+                return
+                
+            name = original_item[0]
+            engraving = original_item[1]
+            color = original_item[2]
+            case_type_name = original_item[3]
+            sku_raw = original_item[4] if len(original_item) > 4 else ""
+            sku_data_kw = original_item[5] if len(original_item) > 5 else ""
+            
+            current_values = tree.item(item_id)['values']
+            mapped_lid = current_values[3] if current_values and len(current_values) > 3 else ""
+            
+            details_text = f"Product Name:\n{name}\n\n" \
+                           f"ShipHero Raw SKU:\n{sku_raw}\n\n" \
+                           f"SKU Keyword (from skuData):\n{sku_data_kw}\n\n" \
+                           f"Case Type Name:\n{case_type_name}\n\n" \
+                           f"Mapped Lid:\n{mapped_lid}\n\n" \
+                           f"Engraving Text:\n{engraving}\n\n" \
+                           f"Color:\n{color}"
+                           
+            messagebox.showinfo(_("Item Details"), details_text, parent=popup)
+
         btn_f = Frame(popup)
         btn_f.pack(pady=10)
         
         Button(btn_f, text=_("Import Selection"), command=lambda: on_select(None), width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Map Products..."), command=lambda: self.show_product_mapping_dialog(popup, [item[0] for item in items], refresh_tree), width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Details"), command=show_details, width=10).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Settings"), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
         Button(btn_f, text=_("Close"), command=popup.destroy, width=15).pack(side=LEFT, padx=5)
 
     def generateGcode(self):
@@ -1498,14 +1534,19 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         new_lid_entry.grid(row=0, column=1, sticky=EW)
         new_lid_entry.focus_set()
 
-        add_btn = Button(top, text=_("➕ Add Lid"), width=14, padx=8, pady=2)
-        add_btn.grid(row=0, column=2, padx=(8, 0), sticky=W)
-
         # subtle inline hint (space-saving vs long paragraphs)
         hint = Label(top,
                      text=_("{name}-{height}x{width}, mm units  e.g.  Vitamin_XL_Pill-300x1200"),
                      fg="gray", font=("TkDefaultFont", 8))
-        hint.grid(row=1, column=1, columnspan=2, sticky=W, pady=(4, 0))
+        hint.grid(row=1, column=1, columnspan=2, sticky=W, pady=(0, 4))
+
+        # Moved SKU Keyword to top frame
+        Label(top, text=_("SKU Keyword:")).grid(row=2, column=0, sticky=E, padx=(0, 6), pady=(4, 0))
+        df_sku = Entry(top, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=32)
+        df_sku.grid(row=2, column=1, sticky=EW, pady=(4, 0))
+
+        add_btn = Button(top, text=_("➕ Add Lid"), width=14, padx=8, pady=2)
+        add_btn.grid(row=0, column=2, rowspan=3, padx=(8, 0), sticky=W)
 
         top.columnconfigure(1, weight=1)
 
@@ -1578,6 +1619,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")  # NEW
+            df_sku.delete(0, END)
             if not lid_name:
                 return
             cfg = self._lid_defaults.get(lid_name, {})
@@ -1590,6 +1632,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     df_layer.set(cfg["layerHeight"])
                 if cfg.get("rotation") is not None:   # NEW
                     df_rotation.set(cfg["rotation"])
+                if cfg.get("skuKeyword") is not None:
+                    df_sku.insert(0, cfg["skuKeyword"])
 
         def save_defaults_for_selected():
             lid_name = get_selected_lid()
@@ -1601,6 +1645,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             cfg["depth"]       = _float_or_none(df_depth.get())
             cfg["layerHeight"] = _float_or_none(df_layer.get())
             cfg["rotation"]    = _float_or_none(df_rotation.get())
+            cfg["skuKeyword"]  = df_sku.get().strip() or None
             self._lid_defaults[lid_name] = cfg
             self._save_lid_defaults()
             messagebox.showinfo(_("Saved"), _("Default config saved for ‘{}’.").format(lid_name), parent=dialog)
@@ -1611,7 +1656,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 messagebox.showwarning(_("No Selection"), _("Please select a lid to clear defaults."), parent=dialog)
                 return
             if lid_name in self._lid_defaults:
-                for k in ("fontSize", "depth", "layerHeight", "rotation"):  # include rotation
+                for k in ("fontSize", "depth", "layerHeight", "rotation", "skuKeyword"):  # include rotation and skuKeyword
                     self._lid_defaults[lid_name].pop(k, None)
                 if not self._lid_defaults[lid_name]:
                     del self._lid_defaults[lid_name]
@@ -1621,11 +1666,13 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")
+            df_sku.delete(0, END)
             messagebox.showinfo(_("Cleared"), _("Default config cleared for ‘{}’.").format(lid_name), parent=dialog)
 
         # ====== Add/Delete (with blanking) ======
         def add_and_blank(*_):
             name = new_lid_entry.get().strip()
+            sku = df_sku.get().strip()
             if not name:
                 return
             self.add_lid_from_dialog(name, dialog, lid_listbox)
@@ -1637,11 +1684,22 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 lid_listbox.see(idx)
             except Exception:
                 pass
+            
+            if sku:
+                cfg = dict(self._lid_defaults.get(name, {}))
+                cfg["skuKeyword"] = sku
+                self._lid_defaults[name] = cfg
+                self._save_lid_defaults()
+                
             # blank defaults inputs
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")  # NEW
+            df_sku.delete(0, END)
+            
+            if sku:
+                df_sku.insert(0, sku)
 
         def delete_and_blank():
             self.delete_lid_from_dialog(lid_listbox, dialog)
@@ -1650,6 +1708,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")
+            df_sku.delete(0, END)
 
             # Wire buttons
         add_btn.config(command=add_and_blank)
