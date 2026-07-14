@@ -1,0 +1,115 @@
+{
+  "cases": {
+    "single": [
+      { "name": "Nano Pill Case", "keyword": "SPC-NPC", "pockets": "nano", "size": "pill" },
+      { "name": "Nano Vitamin Case", "keyword": "SPC-NVC", "pockets": "nano", "size": "vitamin" },
+      { "name": "MagNano Pill Case", "keyword": "SPC-MGN1P", "pockets": "magnano", "size": "pill" },
+      { "name": "MagNano AM-PM Pill Case", "keyword": "SPC-MGN2P", "pockets": "magnano", "size": "am/pm" },
+      { "name": "Mission Pill Case", "keyword": "SPC-MPC", "pockets": "mission", "size": "pill" },
+      { "name": "Mission Vitamin Case", "keyword": "SPC-MVC", "pockets": "mission", "size": "vitamin" },
+      { "name": "Weekly XS Case", "keyword": "SPC-WXSPC", "pockets": "weekly", "size": "xs" },
+      { "name": "Weekly Pill Case", "keyword": "SPC-WPC", "pockets": "weekly", "size": "pill" },
+      { "name": "Weekly Vitamin Case", "keyword": "SPC-WVC", "pockets": "weekly", "size": "vitamin" },
+      { "name": "Weekly Vitamin XL Case", "keyword": "SPC-WVXC", "pockets": "weekly", "size": "vitamin xl" },
+      { "name": "Weekly Vitamin 2XL Case", "keyword": "SPC-WV2XC", "pockets": "weekly", "size": "vitamin 2xl" },
+      { "name": "Weekly AM-PM Pill Case", "keyword": "BPC-WAPPC2", "pockets": "ampm", "size": "pill" },
+      { "name": "Weekly AM-PM Vitamin Case", "keyword": "BPC-WAC2", "pockets": "ampm", "size": "vitamin" },
+      { "name": "Weekly AM-PM Vitamin XL Case", "keyword": "BPC-WAPVX2", "pockets": "ampm", "size": "vitamin xl" },
+      { "name": "AM - Left Side (Vitamin)", "keyword": "SPC-WVALS", "pockets": "ampm", "size": "vitamin", "note": "Can be used for 2-Week Vitamin" },
+      { "name": "PM - Right Side (Vitamin)", "keyword": "SPC-WVPRS", "pockets": "ampm", "size": "vitamin", "note": "Can be used for 2-Week Vitamin" },
+      { "name": "AM Pill - Left Side", "keyword": "SPC-WVAPLS", "pockets": "ampm", "size": "pill", "note": "Can be used for 2-Week Pill" },
+      { "name": "PM Pill - Right Side", "keyword": "SPC-WVPPRS", "pockets": "ampm", "size": "pill", "note": "Can be used for 2-Week Pill" },
+      { "name": "AM Vitamin XL - Left Side", "keyword": "SPC-HC-WVXALS", "pockets": "ampm", "size": "vitamin xl" },
+      { "name": "PM Vitamin XL - Right Side", "keyword": "SPC-HC-WVXPRS", "pockets": "ampm", "size": "vitamin xl" },
+      { "name": "2-Week Pill Case", "keyword": "BPC-2WPC", "pockets": "2-week", "size": "pill" },
+      { "name": "2-Week Vitamin Case", "keyword": "BPC-2WVC", "pockets": "2-week", "size": "vitamin" },
+      { "name": "2-Week Vitamin XL Case", "keyword": "BPC-2WVXLC2", "pockets": "2-week", "size": "vitamin xl" },
+      { "name": "2-Week Vitamin XL - Left Side", "keyword": "SPC-HC-VXL1TRC", "pockets": "2-week", "size": "vitamin xl" },
+      { "name": "2-Week Vitamin XL - Right Side", "keyword": "SPC-HC-VXL2BLC", "pockets": "2-week", "size": "vitamin xl" }
+    ],
+    "2_pack": [
+      { "name": "Nano Pill Cases (2-Pack)", "keyword": "BPC-NPC2", "pockets": "nano", "size": "pill" },
+      { "name": "Nano Vitamin Cases (2-Pack)", "keyword": "BPC-NVC2", "pockets": "nano", "size": "vitamin" },
+      { "name": "Mission Pill Cases (2-Pack)", "keyword": "BPC-MPC2", "pockets": "mission", "size": "pill" },
+      { "name": "Mission Vitamin Cases (2-Pack)", "keyword": "BPC-MVC2", "pockets": "mission", "size": "vitamin" },
+      { "name": "Weekly Pill Cases (2-Pack)", "keyword": "BPC-WPC2", "pockets": "weekly", "size": "pill" },
+      { "name": "Weekly Vitamin Cases (2-Pack)", "keyword": "BPC-WVC2", "pockets": "weekly", "size": "vitamin" },
+      { "name": "Weekly Vitamin XL Cases (2-Pack)", "keyword": "BPC-WVXC2", "pockets": "weekly", "size": "vitamin xl" }
+    ],
+    "combo_pack": [
+      {
+        "name": "Mission Vitamin + Mission Pill Cases (Combo Pack)",
+        "keyword": "BPC-MPMVCCP",
+        "case1": { "pockets": "mission", "size": "vitamin" },
+        "case2": { "pockets": "mission", "size": "pill" }
+      },
+      {
+        "name": "Weekly Pill + Mission Pill Cases (Combo Pack)",
+        "keyword": "BPC-WPMPCCP",
+        "case1": { "pockets": "weekly", "size": "pill" },
+        "case2": { "pockets": "mission", "size": "pill" }
+      },
+      {
+        "name": "Weekly Pill + Mission Vitamin Cases (Combo Pack)",
+        "keyword": "BPC-WPMVCCP",
+        "case1": { "pockets": "weekly", "size": "pill" },
+        "case2": { "pockets": "mission", "size": "vitamin" }
+      },
+      {
+        "name": "Weekly Vitamin + Weekly Pill Case (Combo Pack)",
+        "keyword": "BPC-WVWPCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin" },
+        "case2": { "pockets": "weekly", "size": "pill" }
+      },
+      {
+        "name": "Weekly Vitamin XL + Weekly Pill Cases (Combo Pack)",
+        "keyword": "BPC-WVXWPCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin xl" },
+        "case2": { "pockets": "weekly", "size": "pill" }
+      },
+      {
+        "name": "Weekly Vitamin + Mission Pill Cases (Combo Pack)",
+        "keyword": "BPC-WVMPCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin" },
+        "case2": { "pockets": "mission", "size": "pill" }
+      },
+      {
+        "name": "Weekly Vitamin + Mission Vitamin Cases (Combo Pack)",
+        "keyword": "BPC-WVMVCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin" },
+        "case2": { "pockets": "mission", "size": "vitamin" }
+      },
+      {
+        "name": "Weekly Vitamin XL + Weekly Vitamin Cases (Combo Pack)",
+        "keyword": "BPC-WVXWVCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin xl" },
+        "case2": { "pockets": "weekly", "size": "vitamin" }
+      },
+      {
+        "name": "Weekly Vitamin XL + Mission Pill Cases (Combo Pack)",
+        "keyword": "BPC-WVXMPCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin xl" },
+        "case2": { "pockets": "mission", "size": "pill" }
+      },
+      {
+        "name": "Weekly Vitamin XL + Mission Vitamin Cases (Combo Pack)",
+        "keyword": "BPC-WVXMVCCP",
+        "case1": { "pockets": "weekly", "size": "vitamin xl" },
+        "case2": { "pockets": "mission", "size": "vitamin" }
+      }
+    ],
+    "3_pack": [
+      { "name": "Triple Pack Case", "keyword": "BPC-3PCB", "pockets": "weekly", "size": "pill" }
+    ],
+    "monthly": [
+      { "name": "Monthly Bundle Case", "keyword": "BPC-MPCB", "pockets": "weekly", "size": "vitamin" }
+    ],
+    "others": [
+      { "name": "CS - Lid Engraving", "keyword": "ENG-LID" },
+      { "name": "CS - In Pockets Engraving - Days of the Week", "keyword": "ENG-DOTW" },
+      { "name": "Body Replacement", "keyword": "REP-BOD" },
+      { "name": "Lid Replacement", "keyword": "REP-LID" },
+      { "name": "Ball Plunger Replacement", "keyword": "REP-BPL" }
+    ]
+  }
+}

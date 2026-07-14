@@ -519,10 +519,18 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.addWidget(GenGcodeFrame.orderNumber)
 
         col += 1
-        self.fetchOrderBtn = Button(frame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
-        self.fetchOrderBtn.grid(row=row, column=col, sticky=W, padx=(2, 0))
+        btnFrame = Frame(frame)
+        btnFrame.grid(row=row, column=col, sticky=EW)
+
+        self.fetchOrderBtn = Button(btnFrame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
+        self.fetchOrderBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
         tkExtra.Balloon.set(self.fetchOrderBtn, _("Fetch order details from ShipHero"))
         self.addWidget(self.fetchOrderBtn)
+
+        self.shipHeroSettingsBtn = Button(btnFrame, text="⚙️", command=self.show_shiphero_config_dialog, width=2, height=1)
+        self.shipHeroSettingsBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
+        tkExtra.Balloon.set(self.shipHeroSettingsBtn, _("ShipHero API Settings"))
+        self.addWidget(self.shipHeroSettingsBtn)
 
 
         # ----
@@ -962,6 +970,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                   line_items(first: 20) {
                     edges {
                       node {
+                        sku
                         product_name
                         custom_options
                       }
@@ -1004,22 +1013,60 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             order_node = edges[0]["node"]
             line_items = order_node.get("line_items", {}).get("edges", [])
             
+            sku_data = {}
+            try:
+                import os, json
+                sku_file = os.path.join(Utils.prgpath, "skuData.json")
+                if os.path.exists(sku_file):
+                    with open(sku_file, "r") as f:
+                        sku_data = json.load(f)
+            except Exception:
+                pass
+            
             items_to_show = []
             for item_edge in line_items:
                 node = item_edge["node"]
+                sku_raw = node.get("sku", "")
+                sku_prefix = sku_raw
+                
+                for cat, items_list in sku_data.get("cases", {}).items():
+                    found = False
+                    for item in items_list:
+                        kw = item.get("keyword")
+                        if kw and sku_raw.startswith(kw):
+                            sku_prefix = item.get("name")
+                            found = True
+                            break
+                    if found:
+                        break
                 name = node.get("product_name", "Unknown")
                 custom = node.get("custom_options") or {}
                 # Custom options can be a list or a dict depending on API version/setup
-                engraving = ""
+                engraving_parts = []
                 if isinstance(custom, dict):
-                    engraving = custom.get("Lid Engraving") or ""
+                    for k, v in custom.items():
+                        if k and "Lid Engraving" in str(k) and v:
+                            base_key = str(k).replace(" Lid Engraving", "").replace("Lid Engraving", "").strip()
+                            color = custom.get(base_key, "")
+                            engraving_parts.append((str(v), str(color)))
                 elif isinstance(custom, list):
                     for opt in custom:
-                        if opt.get("name") == "Lid Engraving":
-                            engraving = opt.get("value") or ""
-                            break
-
-                items_to_show.append((name, engraving))
+                        opt_name = opt.get("name")
+                        if opt_name and "Lid Engraving" in str(opt_name):
+                            opt_val = opt.get("value")
+                            if opt_val:
+                                base_key = str(opt_name).replace(" Lid Engraving", "").replace("Lid Engraving", "").strip()
+                                color = ""
+                                for color_opt in custom:
+                                    if color_opt.get("name") == base_key:
+                                        color = color_opt.get("value", "")
+                                        break
+                                engraving_parts.append((str(opt_val), str(color)))
+                if engraving_parts:
+                    for part, color in engraving_parts:
+                        items_to_show.append((name, part, color, sku_prefix))
+                else:
+                    items_to_show.append((name, "", "", sku_prefix))
 
             if not items_to_show:
                 messagebox.showinfo(_("ShipHero"), _("Order found but no line items available."))
@@ -1174,11 +1221,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         frame = Frame(popup)
         frame.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
         
-        tree = ttk.Treeview(frame, columns=("Product", "Engraving"), show='headings')
+        tree = ttk.Treeview(frame, columns=("Product", "Engraving", "Color", "CaseType"), show='headings')
         tree.heading("Product", text=_("Product Name"))
-        tree.heading("Engraving", text=_("Lid Engraving Content"))
-        tree.column("Product", width=500)
-        tree.column("Engraving", width=250)
+        tree.heading("Engraving", text=_("Engraving Text"))
+        tree.heading("Color", text=_("Color"))
+        tree.heading("CaseType", text=_("Case Type"))
+        tree.column("Product", width=250)
+        tree.column("Engraving", width=100)
+        tree.column("Color", width=100)
+        tree.column("CaseType", width=150)
         
         tree.pack(side=LEFT, expand=YES, fill=BOTH)
         
@@ -1199,11 +1250,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             for item in tree.get_children():
                 tree.delete(item)
             mapping = get_mapping()
-            for name, engraving in items:
+            for name, engraving, color, case_type in items:
                 tag = ()
                 if name not in mapping:
                     tag = ('unmapped',)
-                tree.insert("", END, values=(name, engraving), tags=tag)
+                tree.insert("", END, values=(name, engraving, color, case_type), tags=tag)
 
         refresh_tree()
 
@@ -1236,6 +1287,71 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 popup.destroy()
 
         tree.bind("<Double-1>", on_select) # Double click to select
+        
+        # Inline Combobox logic
+        import os
+        import json
+        
+        case_types = []
+        try:
+            sku_path = os.path.join(os.path.dirname(__file__), "skuData.json")
+            with open(sku_path, "r", encoding="utf-8") as f:
+                sku_data = json.load(f)
+                for category, items in sku_data.get("cases", {}).items():
+                    for item in items:
+                        if "name" in item:
+                            case_types.append(item["name"])
+        except Exception as e:
+            print(f"Error loading skuData.json: {e}")
+            messagebox.showwarning(_("Warning"), _("Error loading skuData.json:\n{}").format(e))
+            case_types = ["Case Type 1", "Case Type 2", "Case Type 3", "Case Type 4"]
+
+        combo = ttk.Combobox(frame, values=case_types, state="readonly")
+        
+        def on_click(event):
+            region = tree.identify_region(event.x, event.y)
+            if region != "cell":
+                combo.place_forget()
+                return
+                
+            column = tree.identify_column(event.x)
+            if column != "#4": # CaseType is column 4
+                combo.place_forget()
+                return
+                
+            item_id = tree.identify_row(event.y)
+            if not item_id:
+                combo.place_forget()
+                return
+                
+            x, y, width, height = tree.bbox(item_id, column)
+            combo.place(x=x, y=y, width=width, height=height)
+            
+            current_value = tree.set(item_id, "CaseType")
+            if current_value in case_types:
+                combo.set(current_value)
+            else:
+                combo.set("")
+            
+            combo.editing_item = item_id
+
+        def on_combo_select(event):
+            item_id = getattr(combo, 'editing_item', None)
+            if item_id:
+                new_value = combo.get()
+                tree.set(item_id, "CaseType", new_value)
+                
+                try:
+                    idx = tree.index(item_id)
+                    items[idx] = (items[idx][0], items[idx][1], items[idx][2], new_value)
+                except Exception:
+                    pass
+
+            combo.place_forget()
+
+        combo.bind("<<ComboboxSelected>>", on_combo_select)
+        combo.bind("<FocusOut>", lambda e: combo.place_forget())
+        tree.bind("<ButtonRelease-1>", on_click)
         
         btn_f = Frame(popup)
         btn_f.pack(pady=10)
