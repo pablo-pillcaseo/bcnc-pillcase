@@ -49,6 +49,7 @@ from tkinter import (
     Radiobutton,
     Toplevel,
     Frame,
+    PanedWindow,
     VERTICAL,
     Scrollbar,
 )
@@ -1132,80 +1133,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.wait_window(dialog)
         return success[0]
 
-    def show_product_mapping_dialog(self, parent_popup, current_products, refresh_callback):
-        import json
-        dialog = Toplevel(parent_popup)
-        dialog.title(_("Product to Lid Mapping"))
-        dialog.geometry("600x400")
-        dialog.transient(parent_popup)
-        dialog.grab_set()
-        
-        mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
-        try:
-            mapping = json.loads(mapping_str)
-        except Exception:
-            mapping = {}
-            
-        frame = Frame(dialog)
-        frame.pack(expand=YES, fill=BOTH, padx=10, pady=10)
-        
-        tree = ttk.Treeview(frame, columns=("Product", "LidName"), show='headings')
-        tree.heading("Product", text=_("Product Name"))
-        tree.heading("LidName", text=_("Lid Name"))
-        tree.column("Product", width=350)
-        tree.column("LidName", width=200)
-        
-        tree.pack(side=LEFT, expand=YES, fill=BOTH)
-        
-        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
-        scrollbar.pack(side=RIGHT, fill=Y)
-        tree.configure(yscrollcommand=scrollbar.set)
-        
-        products_to_show = set(mapping.keys())
-        for p in current_products:
-            products_to_show.add(p)
-            
-        for p in sorted(products_to_show):
-            lid = mapping.get(p, "")
-            tree.insert("", END, values=(p, lid))
-            
-        edit_f = Frame(dialog)
-        edit_f.pack(fill=X, padx=10, pady=5)
-        
-        Label(edit_f, text=_("Lid Name:")).pack(side=LEFT)
-        lid_var = StringVar()
-        lid_cb = ttk.Combobox(edit_f, textvariable=lid_var, values=self.lid_list, state="readonly")
-        lid_cb.pack(side=LEFT, fill=X, expand=YES, padx=5)
-        
-        def on_select(e):
-            selected = tree.selection()
-            if selected:
-                lid = tree.item(selected[0])['values'][1]
-                lid_var.set(lid if lid else "")
-        tree.bind("<<TreeviewSelect>>", on_select)
-        
-        def save_mapping():
-            selected = tree.selection()
-            if selected:
-                p = tree.item(selected[0])['values'][0]
-                lid = lid_var.get().strip()
-                if lid:
-                    mapping[p] = lid
-                    tree.item(selected[0], values=(p, lid))
-                else:
-                    if p in mapping:
-                        del mapping[p]
-                    tree.item(selected[0], values=(p, ""))
-                    
-        Button(edit_f, text=_("Update Mapping"), command=save_mapping).pack(side=LEFT)
-        
-        def close_and_save():
-            Utils.setStr("SurfAlign", "productToLidMap", json.dumps(mapping))
-            Utils.saveConfiguration()
-            dialog.destroy()
-            refresh_callback()
-            
-        Button(dialog, text=_("Close"), command=close_and_save).pack(pady=10)
+
 
     def display_shiphero_order_popup(self, items):
         import json
@@ -1223,26 +1151,65 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         Label(popup, text=_("Select a product to import its 'Lid Engraving' text:"), 
               font=("", 10, "bold"), pady=10).pack()
 
-        frame = Frame(popup)
-        frame.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
+        main_pane = PanedWindow(popup, orient=HORIZONTAL)
+        main_pane.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
         
-        tree = ttk.Treeview(frame, columns=("Product", "Engraving", "Color", "CaseType"), show='headings')
+        left_frame = Frame(main_pane)
+        main_pane.add(left_frame, minsize=300)
+        
+        tree = ttk.Treeview(left_frame, columns=("Product", "MappedLid"), show='headings', displaycolumns=("Product",))
         tree.heading("Product", text=_("Product Name"))
-        tree.heading("Engraving", text=_("Engraving Text"))
-        tree.heading("Color", text=_("Color"))
-        tree.heading("CaseType", text=_("Mapped Lid"))
-        tree.column("Product", width=250)
-        tree.column("Engraving", width=100)
-        tree.column("Color", width=100)
-        tree.column("CaseType", width=150)
+        tree.column("Product", width=300)
         
         tree.pack(side=LEFT, expand=YES, fill=BOTH)
         
-        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
+        scrollbar = Scrollbar(left_frame, orient=VERTICAL, command=tree.yview)
         scrollbar.pack(side=RIGHT, fill=Y)
         tree.configure(yscrollcommand=scrollbar.set)
         
         tree.tag_configure('unmapped', background='#ffcccc')
+        
+        right_frame = LabelFrame(main_pane, text=_("Item Details"), padx=10, pady=10)
+        main_pane.add(right_frame, minsize=300)
+        
+        detail_name = StringVar()
+        detail_raw_sku = StringVar()
+        detail_kw = StringVar()
+        detail_casetype = StringVar()
+        detail_lid = StringVar()
+        detail_engraving = StringVar()
+        detail_color = StringVar()
+
+        def make_detail_row(parent, label_text, str_var, row):
+            Label(parent, text=label_text, font=("", 9, "bold")).grid(row=row, column=0, sticky=NE, pady=5, padx=(0,5))
+            Label(parent, textvariable=str_var, justify=LEFT, wraplength=250, anchor=NW).grid(row=row, column=1, sticky=NW, pady=5)
+
+        make_detail_row(right_frame, "Product Name:", detail_name, 0)
+        make_detail_row(right_frame, "Raw SKU:", detail_raw_sku, 1)
+        make_detail_row(right_frame, "SKU Keyword:", detail_kw, 2)
+        make_detail_row(right_frame, "Case Type:", detail_casetype, 3)
+        
+        Label(right_frame, text="Mapped Lid:", font=("", 9, "bold")).grid(row=4, column=0, sticky=NE, pady=5, padx=(0,5))
+        lid_names = list(self.lid_list) if hasattr(self, 'lid_list') else []
+        override_combo = ttk.Combobox(right_frame, values=lid_names, state="readonly", textvariable=detail_lid, width=25)
+        override_combo.grid(row=4, column=1, sticky=NW, pady=5)
+        
+        def on_combo_change(event):
+            selected = tree.selection()
+            if selected:
+                item_id = selected[0]
+                new_lid = detail_lid.get()
+                vals = list(tree.item(item_id)['values'])
+                if len(vals) >= 2:
+                    vals[1] = new_lid
+                    tree.item(item_id, values=vals)
+                    if new_lid and new_lid != "Unmapped":
+                        tree.item(item_id, tags=())
+        override_combo.bind("<<ComboboxSelected>>", on_combo_change)
+        
+        make_detail_row(right_frame, "Engraving:", detail_engraving, 5)
+        make_detail_row(right_frame, "Color:", detail_color, 6)
+        right_frame.columnconfigure(1, weight=1)
         
         def get_mapped_lid(sku_raw):
             if not sku_raw:
@@ -1270,8 +1237,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 tree.delete(item)
             for item_tuple in items:
                 name = item_tuple[0]
-                engraving = item_tuple[1]
-                color = item_tuple[2]
                 sku_raw = item_tuple[4] if len(item_tuple) > 4 else ""
                 
                 tag = ()
@@ -1280,88 +1245,45 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     tag = ('unmapped',)
                 
                 display_lid = mapped_lid if mapped_lid else "Unmapped"
-                tree.insert("", END, values=(name, engraving, color, display_lid, sku_raw), tags=tag)
+                tree.insert("", END, values=(name, display_lid), tags=tag)
 
         refresh_tree()
 
-        def on_select(event):
+        def on_tree_select(event):
             selected = tree.selection()
             if selected:
-                item_values = tree.item(selected[0])['values']
-                name_val = item_values[0]
-                eng_val = item_values[1]
-                display_lid = item_values[3]
-                
-                if not display_lid or display_lid == "Unmapped":
-                    messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to any Lid Name via SKU Keyword. Please select one from the dropdown or configure it in Lids & Defaults."), parent=popup)
+                item_id = selected[0]
+                try:
+                    idx = tree.index(item_id)
+                    original_item = items[idx]
+                except Exception:
                     return
-                mapped_lid = display_lid
                     
-                if not eng_val or eng_val == "None":
-                    messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
-                    return
+                detail_name.set(original_item[0])
+                detail_engraving.set(original_item[1])
+                detail_color.set(original_item[2])
+                detail_casetype.set(original_item[3])
+                detail_raw_sku.set(original_item[4] if len(original_item) > 4 else "")
+                detail_kw.set(original_item[5] if len(original_item) > 5 else "")
                 
-                self.engraveText.set(str(eng_val))
-                self.lidName.set(mapped_lid)
-                
-                if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
-                    self._apply_defaults_to_main_fields_if_available(mapped_lid)
-                    
-                # Highlight that it's updated
-                messagebox.showinfo(_("Imported"), _("Engraving text and Lid Name updated from selected item."), parent=popup)
-                popup.destroy()
-
-        tree.bind("<Double-1>", on_select) # Double click to select
-        
-        # Inline Combobox logic (allow manual override with any Lid)
-        lid_names = list(self.lid_list) if hasattr(self, 'lid_list') else []
-        combo = ttk.Combobox(frame, values=lid_names, state="readonly")
-        
-        def on_click(event):
-            region = tree.identify_region(event.x, event.y)
-            if region != "cell":
-                combo.place_forget()
-                return
-                
-            column = tree.identify_column(event.x)
-            if column != "#4": # CaseType is column 4
-                combo.place_forget()
-                return
-                
-            item_id = tree.identify_row(event.y)
-            if not item_id:
-                combo.place_forget()
-                return
-                
-            x, y, width, height = tree.bbox(item_id, column)
-            combo.place(x=x, y=y, width=width, height=height)
-            
-            current_value = tree.set(item_id, "CaseType")
-            if current_value in lid_names:
-                combo.set(current_value)
+                vals = tree.item(item_id)['values']
+                detail_lid.set(vals[1] if len(vals) > 1 else "")
             else:
-                combo.set("")
-            
-            combo.editing_item = item_id
+                detail_name.set("")
+                detail_engraving.set("")
+                detail_color.set("")
+                detail_casetype.set("")
+                detail_raw_sku.set("")
+                detail_kw.set("")
+                detail_lid.set("")
 
-        def on_combo_select(event):
-            item_id = getattr(combo, 'editing_item', None)
-            if item_id:
-                new_value = combo.get()
-                tree.set(item_id, "CaseType", new_value)
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
 
-            combo.place_forget()
-
-        combo.bind("<<ComboboxSelected>>", on_combo_select)
-        combo.bind("<FocusOut>", lambda e: combo.place_forget())
-        tree.bind("<ButtonRelease-1>", on_click)
-        
-        def show_details():
+        def import_selected(event=None):
             selected = tree.selection()
             if not selected:
-                messagebox.showinfo(_("Details"), _("Please select an item first."), parent=popup)
                 return
-            
+                
             item_id = selected[0]
             try:
                 idx = tree.index(item_id)
@@ -1369,32 +1291,34 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             except Exception:
                 return
                 
-            name = original_item[0]
-            engraving = original_item[1]
-            color = original_item[2]
-            case_type_name = original_item[3]
-            sku_raw = original_item[4] if len(original_item) > 4 else ""
-            sku_data_kw = original_item[5] if len(original_item) > 5 else ""
+            eng_val = original_item[1]
+            vals = tree.item(item_id)['values']
+            display_lid = vals[1] if len(vals) > 1 else ""
             
-            current_values = tree.item(item_id)['values']
-            mapped_lid = current_values[3] if current_values and len(current_values) > 3 else ""
+            if not display_lid or display_lid == "Unmapped":
+                messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to any Lid Name. Please select one from the dropdown."), parent=popup)
+                return
+                
+            if not eng_val or eng_val == "None":
+                messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
+                return
             
-            details_text = f"Product Name:\n{name}\n\n" \
-                           f"ShipHero Raw SKU:\n{sku_raw}\n\n" \
-                           f"SKU Keyword (from skuData):\n{sku_data_kw}\n\n" \
-                           f"Case Type Name:\n{case_type_name}\n\n" \
-                           f"Mapped Lid:\n{mapped_lid}\n\n" \
-                           f"Engraving Text:\n{engraving}\n\n" \
-                           f"Color:\n{color}"
-                           
-            messagebox.showinfo(_("Item Details"), details_text, parent=popup)
+            self.engraveText.set(str(eng_val))
+            self.lidName.set(display_lid)
+            
+            if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
+                self._apply_defaults_to_main_fields_if_available(display_lid)
+                
+            messagebox.showinfo(_("Imported"), _("Engraving text and Lid Name updated from selected item."), parent=popup)
+            popup.destroy()
+
+        tree.bind("<Double-1>", import_selected)
 
         btn_f = Frame(popup)
         btn_f.pack(pady=10)
         
-        Button(btn_f, text=_("Import Selection"), command=lambda: on_select(None), width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Details"), command=show_details, width=10).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Settings"), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Import Selection"), command=import_selected, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
         Button(btn_f, text=_("Close"), command=popup.destroy, width=15).pack(side=LEFT, padx=5)
 
     def generateGcode(self):
