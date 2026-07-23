@@ -1667,19 +1667,52 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     
                     # Check for conflicts
                     import_defaults = data.get("defaults", {})
-                    conflicts = [lid for lid in import_defaults if lid in self._lid_defaults]
+                    # Collect all existing SKUs to detect conflicts
+                    existing_skus = {cfg.get("skuKeyword") for cfg in self._lid_defaults.values() if cfg.get("skuKeyword")}
+                    
+                    conflicts = []
+                    for lid, cfg in import_defaults.items():
+                        sku = cfg.get("skuKeyword")
+                        if lid in self._lid_defaults or (sku and sku in existing_skus):
+                            conflicts.append(lid)
                     overwrite = True
                     if conflicts:
                         conflict_str = "\n".join("• " + lid for lid in conflicts[:10])
                         if len(conflicts) > 10:
                             conflict_str += "\n" + _("...and {} more").format(len(conflicts) - 10)
                         
-                        msg = _("{} lids already exist:\n\n{}\n\nDo you want to overwrite their settings?").format(len(conflicts), conflict_str)
+                        msg = _("{} lids already exist or conflict:\n\n{}\n\nDo you want to overwrite their settings?").format(len(conflicts), conflict_str)
                         overwrite = messagebox.askyesno(
                             _("Conflicts Detected"),
                             msg,
                             parent=dialog
                         )
+
+                    if not overwrite:
+                        # Filter out conflicting defaults and lids
+                        if "defaults" in data:
+                            data["defaults"] = {k: v for k, v in data["defaults"].items() if k not in conflicts}
+                        if "lids" in data:
+                            data["lids"] = [k for k in data["lids"] if k not in conflicts]
+                    else:
+                        # Overwrite is True. Remove old lids that conflict by SKU
+                        for lid in conflicts:
+                            cfg = import_defaults.get(lid, {})
+                            sku = cfg.get("skuKeyword")
+                            if sku:
+                                # Find ALL existing lids that have this SKU and remove them
+                                old_lids_to_remove = [old_lid for old_lid, old_cfg in self._lid_defaults.items() 
+                                                      if old_cfg.get("skuKeyword") == sku and old_lid != lid]
+                                for old_lid in old_lids_to_remove:
+                                    del self._lid_defaults[old_lid]
+                                    if old_lid in self.lid_list:
+                                        self.lid_list.remove(old_lid)
+                                        # Update listbox
+                                        items = lid_listbox.get(0, END)
+                                        if old_lid in items:
+                                            lid_listbox.delete(items.index(old_lid))
+                                    changed = True
+
 
                     if "lids" in data:
                         for lid in data["lids"]:
@@ -1690,10 +1723,12 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                                 
                     if "defaults" in data:
                         for lid, cfg in data["defaults"].items():
-                            if lid in conflicts and not overwrite:
-                                continue
                             self._lid_defaults[lid] = cfg
                             changed = True
+                            if lid not in self.lid_list:
+                                self.lid_list.append(lid)
+                                lid_listbox.insert(END, lid)
+                                changed = True
                     
                     if changed:
                         self._save_lid_defaults()
