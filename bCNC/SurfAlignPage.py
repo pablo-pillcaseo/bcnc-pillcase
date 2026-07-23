@@ -5,6 +5,7 @@
 #   Date: 18-Jun-2015
 
 # import time
+from Utils import _
 import math
 import sys
 import time
@@ -49,6 +50,7 @@ from tkinter import (
     Radiobutton,
     Toplevel,
     Frame,
+    PanedWindow,
     VERTICAL,
     Scrollbar,
 )
@@ -519,10 +521,18 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.addWidget(GenGcodeFrame.orderNumber)
 
         col += 1
-        self.fetchOrderBtn = Button(frame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
-        self.fetchOrderBtn.grid(row=row, column=col, sticky=W, padx=(2, 0))
+        btnFrame = Frame(frame)
+        btnFrame.grid(row=row, column=col, sticky=EW)
+
+        self.fetchOrderBtn = Button(btnFrame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
+        self.fetchOrderBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
         tkExtra.Balloon.set(self.fetchOrderBtn, _("Fetch order details from ShipHero"))
         self.addWidget(self.fetchOrderBtn)
+
+        self.shipHeroSettingsBtn = Button(btnFrame, text="⚙️", command=self.show_shiphero_and_asset_config_dialog, width=2, height=1)
+        self.shipHeroSettingsBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
+        tkExtra.Balloon.set(self.shipHeroSettingsBtn, _("ShipHero & Asset Configuration"))
+        self.addWidget(self.shipHeroSettingsBtn)
 
 
         # ----
@@ -941,7 +951,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         endpoint, token = self.get_shiphero_credentials()
         if not endpoint or not token:
-            if not self.show_shiphero_config_dialog():
+            if not self.show_shiphero_and_asset_config_dialog():
                 return
             endpoint, token = self.get_shiphero_credentials()
 
@@ -962,6 +972,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                   line_items(first: 20) {
                     edges {
                       node {
+                        sku
                         product_name
                         custom_options
                       }
@@ -1004,22 +1015,77 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             order_node = edges[0]["node"]
             line_items = order_node.get("line_items", {}).get("edges", [])
             
+            if not hasattr(self, "_lid_defaults"):
+                self._lid_defaults = self._load_lid_defaults()
+            
             items_to_show = []
             for item_edge in line_items:
                 node = item_edge["node"]
+                sku_raw = node.get("sku", "")
+                sku_prefix = sku_raw
+                
+                best_match_name = None
+                best_match_len = -1
+                best_match_keyword = ""
+                has_match = False
+                has_case_type = False
+                
+                for lid_name, cfg in self._lid_defaults.items():
+                    if isinstance(cfg, dict):
+                        kw = cfg.get("skuKeyword")
+                        if kw and kw.strip():
+                            kw_lower = kw.strip().lower()
+                            sku_lower = sku_raw.lower()
+                            if sku_lower == kw_lower or sku_lower.startswith(kw_lower + "-"):
+                                if len(kw_lower) > best_match_len:
+                                    best_match_len = len(kw_lower)
+                                    has_match = True
+                                    ctype = cfg.get("caseType")
+                                    if ctype and ctype.strip():
+                                        best_match_name = ctype.strip()
+                                        has_case_type = True
+                                    else:
+                                        best_match_name = None
+                                        has_case_type = False
+                                    best_match_keyword = kw
+                                
+                case_type_status = "ok"
+                if not has_match:
+                    sku_prefix = "No SKU Keyword Match Found"
+                    case_type_status = "error"
+                elif not has_case_type:
+                    sku_prefix = "Case Type Missing in Settings"
+                    case_type_status = "error"
+                else:
+                    sku_prefix = best_match_name
                 name = node.get("product_name", "Unknown")
                 custom = node.get("custom_options") or {}
                 # Custom options can be a list or a dict depending on API version/setup
-                engraving = ""
+                engraving_parts = []
                 if isinstance(custom, dict):
-                    engraving = custom.get("Lid Engraving") or ""
+                    for k, v in custom.items():
+                        if k and "Lid Engraving" in str(k) and v:
+                            base_key = str(k).replace(" Lid Engraving", "").replace("Lid Engraving", "").strip()
+                            color = custom.get(base_key, "")
+                            engraving_parts.append((str(v), str(color)))
                 elif isinstance(custom, list):
                     for opt in custom:
-                        if opt.get("name") == "Lid Engraving":
-                            engraving = opt.get("value") or ""
-                            break
-
-                items_to_show.append((name, engraving))
+                        opt_name = opt.get("name")
+                        if opt_name and "Lid Engraving" in str(opt_name):
+                            opt_val = opt.get("value")
+                            if opt_val:
+                                base_key = str(opt_name).replace(" Lid Engraving", "").replace("Lid Engraving", "").strip()
+                                color = ""
+                                for color_opt in custom:
+                                    if color_opt.get("name") == base_key:
+                                        color = color_opt.get("value", "")
+                                        break
+                                engraving_parts.append((str(opt_val), str(color)))
+                if engraving_parts:
+                    for part, color in engraving_parts:
+                        items_to_show.append((name, part, color, sku_prefix, sku_raw, best_match_keyword, case_type_status))
+                else:
+                    items_to_show.append((name, "", "", sku_prefix, sku_raw, best_match_keyword, case_type_status))
 
             if not items_to_show:
                 messagebox.showinfo(_("ShipHero"), _("Order found but no line items available."))
@@ -1035,10 +1101,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if hasattr(self, "fetchOrderBtn"):
                 self.fetchOrderBtn.config(state=NORMAL)
 
-    def show_shiphero_config_dialog(self):
+    def show_shiphero_and_asset_config_dialog(self):
         dialog = Toplevel(self)
-        dialog.title(_("ShipHero API Configuration"))
-        dialog.geometry("500x250")
+        dialog.title(_("ShipHero & Asset Configuration"))
+        dialog.geometry("500x300")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1048,115 +1114,71 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         y = self.winfo_rooty() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
 
-        main_f = Frame(dialog, padx=20, pady=20)
+        main_f = Frame(dialog, padx=15, pady=15)
         main_f.pack(expand=YES, fill=BOTH)
 
-        Label(main_f, text=_("ShipHero GraphQL Endpoint:")).pack(anchor=W)
+        # -- ShipHero API Group --
+        api_frame = LabelFrame(main_f, text=_("ShipHero API Integration"), padx=10, pady=10)
+        api_frame.pack(fill=X, pady=(0, 10))
+
+        Label(api_frame, text=_("GraphQL Endpoint:")).grid(row=0, column=0, sticky=E, pady=(0, 5), padx=(0, 5))
         endpoint_var = StringVar(value=Utils.getStr("SurfAlign", "shipheroEndpoint", "https://public-api.shiphero.com/graphql"))
-        Entry(main_f, textvariable=endpoint_var, width=60).pack(pady=(0, 10))
+        Entry(api_frame, textvariable=endpoint_var, width=50).grid(row=0, column=1, sticky=W, pady=(0, 5))
 
-        Label(main_f, text=_("ShipHero Bearer Token:")).pack(anchor=W)
+        Label(api_frame, text=_("Bearer Token:")).grid(row=1, column=0, sticky=E, pady=5, padx=(0, 5))
         token_var = StringVar(value=keyring.get_password("bCNC", "shipheroToken") or "")
-        Entry(main_f, textvariable=token_var, width=60, show="*").pack(pady=(0, 10))
+        Entry(api_frame, textvariable=token_var, width=50, show="*").grid(row=1, column=1, sticky=W, pady=5)
         
-        Label(main_f, text=_("Credentials are stored securely in Windows Credential Manager."), 
-              font=("", 8, "italic"), foreground="gray").pack(anchor=W)
+        Label(api_frame, text=_("Credentials are stored securely in Windows Credential Manager."), 
+              font=("", 8, "italic"), foreground="gray").grid(row=2, column=1, sticky=W, pady=(2, 0))
 
+        # -- Local Assets Group --
+        asset_frame = LabelFrame(main_f, text=_("Local Assets"), padx=10, pady=10)
+        asset_frame.pack(fill=X, pady=(0, 15))
+
+        Label(asset_frame, text=_("Lid Color Thumbnails:")).grid(row=0, column=0, sticky=E, pady=5, padx=(0, 5))
+        
+        thumb_inner_f = Frame(asset_frame)
+        thumb_inner_f.grid(row=0, column=1, sticky=W, pady=5)
+        
+        thumbnails_var = StringVar(value=Utils.getStr("SurfAlign", "thumbnailsDir", ""))
+        Entry(thumb_inner_f, textvariable=thumbnails_var, width=40).pack(side=LEFT)
+        
+        def browse_thumb_dir():
+            from tkinter import filedialog
+            d = filedialog.askdirectory(parent=dialog, title=_("Select Thumbnails Directory"), initialdir=thumbnails_var.get())
+            if d:
+                thumbnails_var.set(d)
+                
+        Button(thumb_inner_f, text=_("Browse..."), command=browse_thumb_dir).pack(side=LEFT, padx=(5, 0))
+
+        # -- Action Buttons --
+        btn_f = Frame(main_f)
+        btn_f.pack(fill=X, pady=(10, 0))
+        
         success = [False]
 
         def save():
             self.set_shiphero_credentials(endpoint_var.get().strip(), token_var.get().strip())
+            Utils.setStr("SurfAlign", "thumbnailsDir", thumbnails_var.get().strip())
             success[0] = True
             dialog.destroy()
 
         def cancel():
             dialog.destroy()
 
-        btn_f = Frame(main_f)
-        btn_f.pack(pady=(20, 0))
-        Button(btn_f, text=_("Save"), command=save, width=10).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Cancel"), command=cancel, width=10).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Cancel"), command=cancel, width=12).pack(side=RIGHT, padx=(5, 0))
+        Button(btn_f, text=_("Save"), command=save, width=12).pack(side=RIGHT, padx=(5, 5))
         
         self.wait_window(dialog)
         return success[0]
 
-    def show_product_mapping_dialog(self, parent_popup, current_products, refresh_callback):
-        import json
-        dialog = Toplevel(parent_popup)
-        dialog.title(_("Product to Lid Mapping"))
-        dialog.geometry("600x400")
-        dialog.transient(parent_popup)
-        dialog.grab_set()
-        
-        mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
-        try:
-            mapping = json.loads(mapping_str)
-        except Exception:
-            mapping = {}
-            
-        frame = Frame(dialog)
-        frame.pack(expand=YES, fill=BOTH, padx=10, pady=10)
-        
-        tree = ttk.Treeview(frame, columns=("Product", "LidName"), show='headings')
-        tree.heading("Product", text=_("Product Name"))
-        tree.heading("LidName", text=_("Lid Name"))
-        tree.column("Product", width=350)
-        tree.column("LidName", width=200)
-        
-        tree.pack(side=LEFT, expand=YES, fill=BOTH)
-        
-        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
-        scrollbar.pack(side=RIGHT, fill=Y)
-        tree.configure(yscrollcommand=scrollbar.set)
-        
-        products_to_show = set(mapping.keys())
-        for p in current_products:
-            products_to_show.add(p)
-            
-        for p in sorted(products_to_show):
-            lid = mapping.get(p, "")
-            tree.insert("", END, values=(p, lid))
-            
-        edit_f = Frame(dialog)
-        edit_f.pack(fill=X, padx=10, pady=5)
-        
-        Label(edit_f, text=_("Lid Name:")).pack(side=LEFT)
-        lid_var = StringVar()
-        lid_cb = ttk.Combobox(edit_f, textvariable=lid_var, values=self.lid_list, state="readonly")
-        lid_cb.pack(side=LEFT, fill=X, expand=YES, padx=5)
-        
-        def on_select(e):
-            selected = tree.selection()
-            if selected:
-                lid = tree.item(selected[0])['values'][1]
-                lid_var.set(lid if lid else "")
-        tree.bind("<<TreeviewSelect>>", on_select)
-        
-        def save_mapping():
-            selected = tree.selection()
-            if selected:
-                p = tree.item(selected[0])['values'][0]
-                lid = lid_var.get().strip()
-                if lid:
-                    mapping[p] = lid
-                    tree.item(selected[0], values=(p, lid))
-                else:
-                    if p in mapping:
-                        del mapping[p]
-                    tree.item(selected[0], values=(p, ""))
-                    
-        Button(edit_f, text=_("Update Mapping"), command=save_mapping).pack(side=LEFT)
-        
-        def close_and_save():
-            Utils.setStr("SurfAlign", "productToLidMap", json.dumps(mapping))
-            Utils.saveConfiguration()
-            dialog.destroy()
-            refresh_callback()
-            
-        Button(dialog, text=_("Close"), command=close_and_save).pack(pady=10)
+
 
     def display_shiphero_order_popup(self, items):
-        import json
+        import os
+        
+
         popup = Toplevel(self)
         popup.title(_("ShipHero Order Items"))
         popup.geometry("800x500")
@@ -1168,81 +1190,272 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         y = self.winfo_rooty() + (self.winfo_height() // 2) - (popup.winfo_height() // 2)
         popup.geometry(f"+{x}+{y}")
         
-        Label(popup, text=_("Select a product to import its 'Lid Engraving' text:"), 
-              font=("", 10, "bold"), pady=10).pack()
-
-        frame = Frame(popup)
-        frame.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
+        top_frame = Frame(popup)
+        top_frame.pack(fill=X, padx=10, pady=5)
         
-        tree = ttk.Treeview(frame, columns=("Product", "Engraving"), show='headings')
-        tree.heading("Product", text=_("Product Name"))
-        tree.heading("Engraving", text=_("Lid Engraving Content"))
-        tree.column("Product", width=500)
-        tree.column("Engraving", width=250)
+        Label(top_frame, text=_("Select a product to import its 'Lid Engraving' text:"), 
+              font=("", 10, "bold")).pack(side=LEFT)
+              
+        hide_non_engraving_var = BooleanVar(value=True)
+
+        main_pane = PanedWindow(popup, orient=HORIZONTAL)
+        main_pane.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
+        
+        left_frame = Frame(main_pane)
+        main_pane.add(left_frame, minsize=300)
+        
+        style = ttk.Style()
+        style.configure("OrderItems.Treeview", rowheight=24)
+        style.layout("OrderItems.Treeview.Item", [
+            ('Treeitem.padding', {'sticky': 'nswe', 'children': [
+                ('Treeitem.image', {'side': 'left', 'sticky': ''}),
+                ('Treeitem.text', {'sticky': 'nswe'})
+            ]})
+        ])
+        
+        tree_container = Frame(left_frame)
+        tree_container.pack(side=TOP, expand=YES, fill=BOTH)
+        
+        tree = ttk.Treeview(tree_container, style="OrderItems.Treeview", columns=("Product", "MappedLid"), show='tree headings', displaycolumns=())
+        tree.heading("#0", text=_("Product Name"))
+        tree.column("#0", width=400)
         
         tree.pack(side=LEFT, expand=YES, fill=BOTH)
         
-        scrollbar = Scrollbar(frame, orient=VERTICAL, command=tree.yview)
+        scrollbar = Scrollbar(tree_container, orient=VERTICAL, command=tree.yview)
         scrollbar.pack(side=RIGHT, fill=Y)
         tree.configure(yscrollcommand=scrollbar.set)
         
         tree.tag_configure('unmapped', background='#ffcccc')
         
-        def get_mapping():
-            mapping_str = Utils.getStr("SurfAlign", "productToLidMap", "{}")
+        Checkbutton(left_frame, text=_("Hide non-engraving items"), variable=hide_non_engraving_var, command=lambda: refresh_tree()).pack(side=BOTTOM, anchor=W, pady=2)
+        
+        right_frame = LabelFrame(main_pane, text=_("Item Details"), padx=10, pady=10)
+        main_pane.add(right_frame, minsize=300)
+        
+        detail_name = StringVar()
+        detail_raw_sku = StringVar()
+        detail_kw = StringVar()
+        detail_casetype = StringVar()
+        detail_lid = StringVar()
+        detail_engraving = StringVar()
+        detail_color = StringVar()
+
+        def make_detail_row(parent, label_text, str_var, row):
+            Label(parent, text=label_text, font=("", 9, "bold")).grid(row=row, column=0, sticky=NE, pady=5, padx=(0,5))
+            val_lbl = Label(parent, textvariable=str_var, justify=LEFT, wraplength=250, anchor=NW)
+            val_lbl.grid(row=row, column=1, sticky=NW, pady=5)
+            return val_lbl
+
+        make_detail_row(right_frame, "Product Name:", detail_name, 0)
+        make_detail_row(right_frame, "Raw SKU:", detail_raw_sku, 1)
+        make_detail_row(right_frame, "SKU Keyword:", detail_kw, 2)
+        casetype_lbl = make_detail_row(right_frame, "Case Type:", detail_casetype, 3)
+        
+        Label(right_frame, text="Mapped Lid:", font=("", 9, "bold")).grid(row=4, column=0, sticky=NE, pady=5, padx=(0,5))
+        lid_names = list(self.lid_list) if hasattr(self, 'lid_list') else []
+        override_combo = ttk.Combobox(right_frame, values=lid_names, state="readonly", textvariable=detail_lid, width=25)
+        override_combo.grid(row=4, column=1, sticky=NW, pady=5)
+        
+        def on_combo_change(event):
+            selected = tree.selection()
+            if selected:
+                item_id = selected[0]
+                new_lid = detail_lid.get()
+                vals = list(tree.item(item_id)['values'])
+                if len(vals) >= 2:
+                    vals[1] = new_lid
+                    tree.item(item_id, values=vals)
+                    if new_lid and new_lid != "Unmapped":
+                        tree.item(item_id, tags=())
+        override_combo.bind("<<ComboboxSelected>>", on_combo_change)
+        
+        make_detail_row(right_frame, "Engraving:", detail_engraving, 5)
+        
+        Label(right_frame, text="Color:", font=("", 9, "bold")).grid(row=6, column=0, sticky=NE, pady=5, padx=(0,5))
+        color_frame = Frame(right_frame)
+        color_frame.grid(row=6, column=1, sticky=NW, pady=5)
+        Label(color_frame, textvariable=detail_color, justify=LEFT, anchor=NW).pack(side=LEFT)
+        color_swatch = tk.Canvas(color_frame, width=32, height=32, highlightthickness=1, highlightbackground="gray")
+        
+        def get_color_icon(color_name, size=18):
+            if not color_name: return None
+            if not hasattr(tree, 'icon_cache'):
+                tree.icon_cache = {}
+            cn = color_name.lower().strip()
+            cache_key = f"{cn}_{size}"
+            if cache_key in tree.icon_cache:
+                return tree.icon_cache[cache_key]
+                
+            filename = color_name.strip().replace(' ', '_').replace('+', 'and').lower() + '.png'
+            thumb_dir = Utils.getStr("SurfAlign", "thumbnailsDir", "")
+            if not thumb_dir:
+                thumb_dir = os.path.join(os.path.dirname(__file__), "pillcase_data", "color_thumbnails")
+            img_path = os.path.join(thumb_dir, filename)
+            
             try:
-                return json.loads(mapping_str)
+                from PIL import Image, ImageTk
+                if os.path.exists(img_path):
+                    img = Image.open(img_path)
+                    img = img.resize((size, size), Image.LANCZOS)
+                    icon = ImageTk.PhotoImage(img)
+                    tree.icon_cache[cache_key] = icon
+                    return icon
             except Exception:
-                return {}
+                pass
+            return None
+
+        def update_swatch(color_name):
+            color_swatch.delete("all")
+            if not color_name or not color_name.strip():
+                color_swatch.pack_forget()
+                return
+                
+            icon = get_color_icon(color_name, size=32)
+            if icon:
+                color_swatch.pack(side=LEFT, padx=(10, 0))
+                color_swatch.image = icon
+                color_swatch.create_image(0, 0, anchor=NW, image=color_swatch.image)
+            else:
+                color_swatch.pack_forget()
+
+        right_frame.columnconfigure(1, weight=1)
+        
+        def get_mapped_lid(sku_raw):
+            if not sku_raw:
+                return None
+            if not hasattr(self, "_lid_defaults"):
+                self._lid_defaults = self._load_lid_defaults()
+            best_lid = None
+            best_len = -1
+            sku_lower = sku_raw.lower()
+            
+            for lid_name, cfg in self._lid_defaults.items():
+                if isinstance(cfg, dict):
+                    kw = cfg.get("skuKeyword")
+                    if kw and kw.strip():
+                        kw_lower = kw.strip().lower()
+                        if sku_lower == kw_lower or sku_lower.startswith(kw_lower + "-"):
+                            if len(kw_lower) > best_len:
+                                best_len = len(kw_lower)
+                                best_lid = lid_name
+                                
+            return best_lid
+
+        displayed_items = []
 
         def refresh_tree():
+            del displayed_items[:]
             for item in tree.get_children():
                 tree.delete(item)
-            mapping = get_mapping()
-            for name, engraving in items:
+            hide_non_engraving = hide_non_engraving_var.get()
+            for item_tuple in items:
+                eng_val = item_tuple[1] if len(item_tuple) > 1 else ""
+                has_engraving = bool(eng_val and str(eng_val).strip() and str(eng_val) != "None")
+                if hide_non_engraving and not has_engraving:
+                    continue
+                
+                displayed_items.append(item_tuple)
+                
+                name = item_tuple[0]
+                color_name = item_tuple[2] if len(item_tuple) > 2 else ""
+                sku_raw = item_tuple[4] if len(item_tuple) > 4 else ""
+                
                 tag = ()
-                if name not in mapping:
+                mapped_lid = get_mapped_lid(sku_raw)
+                if not mapped_lid:
                     tag = ('unmapped',)
-                tree.insert("", END, values=(name, engraving), tags=tag)
+                
+                display_lid = mapped_lid if mapped_lid else "Unmapped"
+                
+                icon = get_color_icon(color_name)
+                display_name = "  " + name if icon else name
+                if icon:
+                    tree.insert("", END, text=display_name, image=icon, values=(name, display_lid), tags=tag)
+                else:
+                    tree.insert("", END, text=display_name, values=(name, display_lid), tags=tag)
 
         refresh_tree()
 
-        def on_select(event):
+        def on_tree_select(event):
             selected = tree.selection()
             if selected:
-                item_values = tree.item(selected[0])['values']
-                name_val = item_values[0]
-                eng_val = item_values[1]
-                
-                mapping = get_mapping()
-                if name_val not in mapping:
-                    messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to a Lid Name. Please map it first."), parent=popup)
+                item_id = selected[0]
+                try:
+                    idx = tree.index(item_id)
+                    original_item = displayed_items[idx]
+                except Exception:
                     return
                     
-                if not eng_val or eng_val == "None":
-                    messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
-                    return
+                detail_name.set(original_item[0])
+                detail_engraving.set(original_item[1])
+                detail_color.set(original_item[2])
+                update_swatch(original_item[2])
+                detail_casetype.set(original_item[3])
+                detail_raw_sku.set(original_item[4] if len(original_item) > 4 else "")
+                detail_kw.set(original_item[5] if len(original_item) > 5 else "")
                 
-                mapped_lid = mapping[name_val]
+                case_status = original_item[6] if len(original_item) > 6 else "ok"
+                if case_status == "error":
+                    casetype_lbl.config(fg="red")
+                else:
+                    casetype_lbl.config(fg="black")
                 
-                self.engraveText.set(str(eng_val))
-                self.lidName.set(mapped_lid)
-                
-                if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
-                    self._apply_defaults_to_main_fields_if_available(mapped_lid)
-                    
-                # Highlight that it's updated
-                messagebox.showinfo(_("Imported"), _("Engraving text and Lid Name updated from selected item."), parent=popup)
-                popup.destroy()
+                vals = tree.item(item_id)['values']
+                detail_lid.set(vals[1] if len(vals) > 1 else "")
+            else:
+                detail_name.set("")
+                detail_engraving.set("")
+                detail_color.set("")
+                update_swatch("")
+                detail_casetype.set("")
+                casetype_lbl.config(fg="black")
+                detail_raw_sku.set("")
+                detail_kw.set("")
+                detail_lid.set("")
 
-        tree.bind("<Double-1>", on_select) # Double click to select
-        
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+
+        def import_selected(event=None):
+            selected = tree.selection()
+            if not selected:
+                return
+                
+            item_id = selected[0]
+            try:
+                idx = tree.index(item_id)
+                original_item = displayed_items[idx]
+            except Exception:
+                return
+                
+            eng_val = original_item[1]
+            vals = tree.item(item_id)['values']
+            display_lid = vals[1] if len(vals) > 1 else ""
+            
+            if not display_lid or display_lid == "Unmapped":
+                messagebox.showwarning(_("Not Mapped"), _("Product is not mapped to any Lid Name. Please select one from the dropdown."), parent=popup)
+                return
+                
+            if not eng_val or eng_val == "None":
+                messagebox.showwarning(_("Missing Engraving"), _("Product does not have a Lid Engraving text."), parent=popup)
+                return
+            
+            self.engraveText.set(str(eng_val))
+            self.lidName.set(display_lid)
+            
+            if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
+                self._apply_defaults_to_main_fields_if_available(display_lid)
+                
+            messagebox.showinfo(_("Imported"), _("Engraving text and Lid Name updated from selected item."), parent=popup)
+            popup.destroy()
+
+        tree.bind("<Double-1>", import_selected)
+
         btn_f = Frame(popup)
         btn_f.pack(pady=10)
         
-        Button(btn_f, text=_("Import Selection"), command=lambda: on_select(None), width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Map Products..."), command=lambda: self.show_product_mapping_dialog(popup, [item[0] for item in items], refresh_tree), width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Import Selection"), command=import_selected, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_and_asset_config_dialog, width=15).pack(side=LEFT, padx=5)
         Button(btn_f, text=_("Close"), command=popup.destroy, width=15).pack(side=LEFT, padx=5)
 
     def generateGcode(self):
@@ -1365,7 +1578,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 return None
 
         dialog = Toplevel(self)
-        dialog.title(_("Lids & Defaults"))
+        dialog.title(_("Lids & Settings"))
         # wider, shorter (space-saving vs tall)
         dialog.geometry("560x360")
         dialog.resizable(True, True)
@@ -1382,14 +1595,23 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         new_lid_entry.grid(row=0, column=1, sticky=EW)
         new_lid_entry.focus_set()
 
-        add_btn = Button(top, text=_("➕ Add Lid"), width=14, padx=8, pady=2)
-        add_btn.grid(row=0, column=2, padx=(8, 0), sticky=W)
-
         # subtle inline hint (space-saving vs long paragraphs)
         hint = Label(top,
                      text=_("{name}-{height}x{width}, mm units  e.g.  Vitamin_XL_Pill-300x1200"),
                      fg="gray", font=("TkDefaultFont", 8))
-        hint.grid(row=1, column=1, columnspan=2, sticky=W, pady=(4, 0))
+        hint.grid(row=1, column=1, columnspan=2, sticky=W, pady=(0, 4))
+
+        # Moved SKU Keyword to top frame
+        Label(top, text=_("SKU Keyword:")).grid(row=2, column=0, sticky=E, padx=(0, 6), pady=(4, 0))
+        df_sku = Entry(top, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=32)
+        df_sku.grid(row=2, column=1, sticky=EW, pady=(4, 0))
+
+        Label(top, text=_("Case Type:")).grid(row=3, column=0, sticky=E, padx=(0, 6), pady=(4, 0))
+        df_case_type = Entry(top, background=tkExtra.GLOBAL_CONTROL_BACKGROUND, width=32)
+        df_case_type.grid(row=3, column=1, sticky=EW, pady=(4, 0))
+
+        add_btn = Button(top, text=_("➕ Add Lid"), width=14, padx=8, pady=2)
+        add_btn.grid(row=0, column=2, rowspan=4, padx=(8, 0), sticky=W)
 
         top.columnconfigure(1, weight=1)
 
@@ -1418,7 +1640,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         delete_btn.pack(pady=(8, 0), anchor="w")
 
         # -- RIGHT: Defaults (compact grid)
-        right = LabelFrame(content, text=_("Defaults (selected lid)"), padx=8, pady=8)
+        right = LabelFrame(content, text=_("Settings (selected lid)"), padx=8, pady=8)
         right.pack(side=LEFT, fill=Y, padx=(10, 0))
 
         Label(right, text=_("Font Size (mm):")).grid(row=0, column=0, sticky=E, padx=(0, 6), pady=(0, 4))
@@ -1449,6 +1671,107 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         # ====== Bottom: Close ======
         bottom = Frame(dialog)
         bottom.pack(fill=X, padx=10, pady=(0, 10))
+
+        def export_data():
+            import json
+            import tkinter.filedialog
+            f = tkinter.filedialog.asksaveasfilename(parent=dialog, title=_("Export Lids & Settings"), defaultextension=".json", filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+            if f:
+                try:
+                    with open(f, 'w', encoding='utf-8') as out:
+                        json.dump({"lids": self.lid_list, "defaults": self._lid_defaults}, out, indent=2)
+                    messagebox.showinfo(_("Export Successful"), _("Exported lids and settings to\n{}").format(f), parent=dialog)
+                except Exception as e:
+                    messagebox.showerror(_("Export Error"), str(e), parent=dialog)
+
+        def import_data():
+            import json
+            import tkinter.filedialog
+            f = tkinter.filedialog.askopenfilename(parent=dialog, title=_("Import Lids & Settings"), filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+            if f:
+                try:
+                    with open(f, 'r', encoding='utf-8') as inp:
+                        data = json.load(inp)
+                    
+                    changed = False
+                    
+                    # Check for conflicts
+                    import_defaults = data.get("defaults", {})
+                    # Collect all existing SKUs to detect conflicts
+                    existing_skus = {cfg.get("skuKeyword") for cfg in self._lid_defaults.values() if cfg.get("skuKeyword")}
+                    
+                    conflicts = []
+                    for lid, cfg in import_defaults.items():
+                        sku = cfg.get("skuKeyword")
+                        if lid in self._lid_defaults or (sku and sku in existing_skus):
+                            conflicts.append(lid)
+                    overwrite = True
+                    if conflicts:
+                        conflict_str = "\n".join("• " + lid for lid in conflicts[:10])
+                        if len(conflicts) > 10:
+                            conflict_str += "\n" + _("...and {} more").format(len(conflicts) - 10)
+                        
+                        msg = _("{} lids already exist or conflict:\n\n{}\n\nDo you want to overwrite their settings?").format(len(conflicts), conflict_str)
+                        overwrite = messagebox.askyesno(
+                            _("Conflicts Detected"),
+                            msg,
+                            parent=dialog
+                        )
+
+                    if not overwrite:
+                        # Filter out conflicting defaults and lids
+                        if "defaults" in data:
+                            data["defaults"] = {k: v for k, v in data["defaults"].items() if k not in conflicts}
+                        if "lids" in data:
+                            data["lids"] = [k for k in data["lids"] if k not in conflicts]
+                    else:
+                        # Overwrite is True. Remove old lids that conflict by SKU
+                        for lid in conflicts:
+                            cfg = import_defaults.get(lid, {})
+                            sku = cfg.get("skuKeyword")
+                            if sku:
+                                # Find ALL existing lids that have this SKU and remove them
+                                old_lids_to_remove = [old_lid for old_lid, old_cfg in self._lid_defaults.items() 
+                                                      if old_cfg.get("skuKeyword") == sku and old_lid != lid]
+                                for old_lid in old_lids_to_remove:
+                                    del self._lid_defaults[old_lid]
+                                    if old_lid in self.lid_list:
+                                        self.lid_list.remove(old_lid)
+                                        # Update listbox
+                                        items = lid_listbox.get(0, END)
+                                        if old_lid in items:
+                                            lid_listbox.delete(items.index(old_lid))
+                                    changed = True
+
+
+                    if "lids" in data:
+                        for lid in data["lids"]:
+                            if lid not in self.lid_list:
+                                self.lid_list.append(lid)
+                                lid_listbox.insert(END, lid)
+                                changed = True
+                                
+                    if "defaults" in data:
+                        for lid, cfg in data["defaults"].items():
+                            self._lid_defaults[lid] = cfg
+                            changed = True
+                            if lid not in self.lid_list:
+                                self.lid_list.append(lid)
+                                lid_listbox.insert(END, lid)
+                                changed = True
+                    
+                    if changed:
+                        self._save_lid_defaults()
+                        self.saveConfig()
+                        if hasattr(self, 'lidName_selector'):
+                            self.lidName_selector['values'] = self.lid_list
+                            
+                    messagebox.showinfo(_("Import Successful"), _("Imported lids and settings from\n{}").format(f), parent=dialog)
+                except Exception as e:
+                    messagebox.showerror(_("Import Error"), str(e), parent=dialog)
+
+        Button(bottom, text=_("📤 Export"), command=export_data, padx=8, pady=2).pack(side=LEFT, padx=(0, 5))
+        Button(bottom, text=_("📥 Import"), command=import_data, padx=8, pady=2).pack(side=LEFT)
         Button(bottom, text=_("Close"), command=dialog.destroy, padx=10, pady=2).pack(side=RIGHT)
 
         # ====== Helpers (selection & defaults I/O) ======
@@ -1462,6 +1785,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")  # NEW
+            df_sku.delete(0, END)
+            df_case_type.delete(0, END)
             if not lid_name:
                 return
             cfg = self._lid_defaults.get(lid_name, {})
@@ -1474,28 +1799,34 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     df_layer.set(cfg["layerHeight"])
                 if cfg.get("rotation") is not None:   # NEW
                     df_rotation.set(cfg["rotation"])
+                if cfg.get("skuKeyword") is not None:
+                    df_sku.insert(0, cfg["skuKeyword"])
+                if cfg.get("caseType") is not None:
+                    df_case_type.insert(0, cfg["caseType"])
 
         def save_defaults_for_selected():
             lid_name = get_selected_lid()
             if not lid_name:
-                messagebox.showwarning(_("No Selection"), _("Please select a lid to save defaults."), parent=dialog)
+                messagebox.showwarning(_("No Selection"), _("Please select a lid to save settings."), parent=dialog)
                 return
             cfg = dict(self._lid_defaults.get(lid_name, {}))
             cfg["fontSize"]    = _float_or_none(df_font_size.get())
             cfg["depth"]       = _float_or_none(df_depth.get())
             cfg["layerHeight"] = _float_or_none(df_layer.get())
             cfg["rotation"]    = _float_or_none(df_rotation.get())
+            cfg["skuKeyword"]  = df_sku.get().strip() or None
+            cfg["caseType"]    = df_case_type.get().strip() or None
             self._lid_defaults[lid_name] = cfg
             self._save_lid_defaults()
-            messagebox.showinfo(_("Saved"), _("Default config saved for ‘{}’.").format(lid_name), parent=dialog)
+            messagebox.showinfo(_("Saved"), _("Settings saved for ‘{}’.").format(lid_name), parent=dialog)
 
         def clear_defaults_for_selected():
             lid_name = get_selected_lid()
             if not lid_name:
-                messagebox.showwarning(_("No Selection"), _("Please select a lid to clear defaults."), parent=dialog)
+                messagebox.showwarning(_("No Selection"), _("Please select a lid to clear settings."), parent=dialog)
                 return
             if lid_name in self._lid_defaults:
-                for k in ("fontSize", "depth", "layerHeight", "rotation"):  # include rotation
+                for k in ("fontSize", "depth", "layerHeight", "rotation", "skuKeyword", "caseType"):  # include rotation and skuKeyword
                     self._lid_defaults[lid_name].pop(k, None)
                 if not self._lid_defaults[lid_name]:
                     del self._lid_defaults[lid_name]
@@ -1505,11 +1836,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")
-            messagebox.showinfo(_("Cleared"), _("Default config cleared for ‘{}’.").format(lid_name), parent=dialog)
+            df_sku.delete(0, END)
+            df_case_type.delete(0, END)
+            messagebox.showinfo(_("Cleared"), _("Settings cleared for ‘{}’.").format(lid_name), parent=dialog)
 
         # ====== Add/Delete (with blanking) ======
         def add_and_blank(*_):
             name = new_lid_entry.get().strip()
+            sku = df_sku.get().strip()
+            ctype = df_case_type.get().strip()
             if not name:
                 return
             self.add_lid_from_dialog(name, dialog, lid_listbox)
@@ -1521,11 +1856,26 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 lid_listbox.see(idx)
             except Exception:
                 pass
+            
+            if sku or ctype:
+                cfg = dict(self._lid_defaults.get(name, {}))
+                if sku: cfg["skuKeyword"] = sku
+                if ctype: cfg["caseType"] = ctype
+                self._lid_defaults[name] = cfg
+                self._save_lid_defaults()
+                
             # blank defaults inputs
             df_font_size.set("")
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")  # NEW
+            df_sku.delete(0, END)
+            df_case_type.delete(0, END)
+            
+            if sku:
+                df_sku.insert(0, sku)
+            if ctype:
+                df_case_type.insert(0, ctype)
 
         def delete_and_blank():
             self.delete_lid_from_dialog(lid_listbox, dialog)
@@ -1534,6 +1884,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_depth.set("")
             df_layer.set("")
             df_rotation.set("")
+            df_sku.delete(0, END)
+            df_case_type.delete(0, END)
 
             # Wire buttons
         add_btn.config(command=add_and_blank)
