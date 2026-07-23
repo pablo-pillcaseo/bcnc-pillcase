@@ -529,9 +529,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(self.fetchOrderBtn, _("Fetch order details from ShipHero"))
         self.addWidget(self.fetchOrderBtn)
 
-        self.shipHeroSettingsBtn = Button(btnFrame, text="⚙️", command=self.show_shiphero_config_dialog, width=2, height=1)
+        self.shipHeroSettingsBtn = Button(btnFrame, text="⚙️", command=self.show_shiphero_and_asset_config_dialog, width=2, height=1)
         self.shipHeroSettingsBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
-        tkExtra.Balloon.set(self.shipHeroSettingsBtn, _("ShipHero API Settings"))
+        tkExtra.Balloon.set(self.shipHeroSettingsBtn, _("ShipHero & Asset Configuration"))
         self.addWidget(self.shipHeroSettingsBtn)
 
 
@@ -951,7 +951,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         endpoint, token = self.get_shiphero_credentials()
         if not endpoint or not token:
-            if not self.show_shiphero_config_dialog():
+            if not self.show_shiphero_and_asset_config_dialog():
                 return
             endpoint, token = self.get_shiphero_credentials()
 
@@ -1101,10 +1101,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if hasattr(self, "fetchOrderBtn"):
                 self.fetchOrderBtn.config(state=NORMAL)
 
-    def show_shiphero_config_dialog(self):
+    def show_shiphero_and_asset_config_dialog(self):
         dialog = Toplevel(self)
-        dialog.title(_("ShipHero API Configuration"))
-        dialog.geometry("500x250")
+        dialog.title(_("ShipHero & Asset Configuration"))
+        dialog.geometry("500x300")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1114,34 +1114,61 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         y = self.winfo_rooty() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
 
-        main_f = Frame(dialog, padx=20, pady=20)
+        main_f = Frame(dialog, padx=15, pady=15)
         main_f.pack(expand=YES, fill=BOTH)
 
-        Label(main_f, text=_("ShipHero GraphQL Endpoint:")).pack(anchor=W)
+        # -- ShipHero API Group --
+        api_frame = LabelFrame(main_f, text=_("ShipHero API Integration"), padx=10, pady=10)
+        api_frame.pack(fill=X, pady=(0, 10))
+
+        Label(api_frame, text=_("GraphQL Endpoint:")).grid(row=0, column=0, sticky=E, pady=(0, 5), padx=(0, 5))
         endpoint_var = StringVar(value=Utils.getStr("SurfAlign", "shipheroEndpoint", "https://public-api.shiphero.com/graphql"))
-        Entry(main_f, textvariable=endpoint_var, width=60).pack(pady=(0, 10))
+        Entry(api_frame, textvariable=endpoint_var, width=50).grid(row=0, column=1, sticky=W, pady=(0, 5))
 
-        Label(main_f, text=_("ShipHero Bearer Token:")).pack(anchor=W)
+        Label(api_frame, text=_("Bearer Token:")).grid(row=1, column=0, sticky=E, pady=5, padx=(0, 5))
         token_var = StringVar(value=keyring.get_password("bCNC", "shipheroToken") or "")
-        Entry(main_f, textvariable=token_var, width=60, show="*").pack(pady=(0, 10))
+        Entry(api_frame, textvariable=token_var, width=50, show="*").grid(row=1, column=1, sticky=W, pady=5)
         
-        Label(main_f, text=_("Credentials are stored securely in Windows Credential Manager."), 
-              font=("", 8, "italic"), foreground="gray").pack(anchor=W)
+        Label(api_frame, text=_("Credentials are stored securely in Windows Credential Manager."), 
+              font=("", 8, "italic"), foreground="gray").grid(row=2, column=1, sticky=W, pady=(2, 0))
 
+        # -- Local Assets Group --
+        asset_frame = LabelFrame(main_f, text=_("Local Assets"), padx=10, pady=10)
+        asset_frame.pack(fill=X, pady=(0, 15))
+
+        Label(asset_frame, text=_("Lid Color Thumbnails:")).grid(row=0, column=0, sticky=E, pady=5, padx=(0, 5))
+        
+        thumb_inner_f = Frame(asset_frame)
+        thumb_inner_f.grid(row=0, column=1, sticky=W, pady=5)
+        
+        thumbnails_var = StringVar(value=Utils.getStr("SurfAlign", "thumbnailsDir", ""))
+        Entry(thumb_inner_f, textvariable=thumbnails_var, width=40).pack(side=LEFT)
+        
+        def browse_thumb_dir():
+            from tkinter import filedialog
+            d = filedialog.askdirectory(parent=dialog, title=_("Select Thumbnails Directory"), initialdir=thumbnails_var.get())
+            if d:
+                thumbnails_var.set(d)
+                
+        Button(thumb_inner_f, text=_("Browse..."), command=browse_thumb_dir).pack(side=LEFT, padx=(5, 0))
+
+        # -- Action Buttons --
+        btn_f = Frame(main_f)
+        btn_f.pack(fill=X, pady=(10, 0))
+        
         success = [False]
 
         def save():
             self.set_shiphero_credentials(endpoint_var.get().strip(), token_var.get().strip())
+            Utils.setStr("SurfAlign", "thumbnailsDir", thumbnails_var.get().strip())
             success[0] = True
             dialog.destroy()
 
         def cancel():
             dialog.destroy()
 
-        btn_f = Frame(main_f)
-        btn_f.pack(pady=(20, 0))
-        Button(btn_f, text=_("Save"), command=save, width=10).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Cancel"), command=cancel, width=10).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Cancel"), command=cancel, width=12).pack(side=RIGHT, padx=(5, 0))
+        Button(btn_f, text=_("Save"), command=save, width=12).pack(side=RIGHT, padx=(5, 5))
         
         self.wait_window(dialog)
         return success[0]
@@ -1261,7 +1288,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 return tree.icon_cache[cache_key]
                 
             filename = color_name.strip().replace(' ', '_').replace('+', 'and').lower() + '.png'
-            img_path = os.path.join(os.path.dirname(__file__), "pillcase_data", "color_thumbnails", filename)
+            thumb_dir = Utils.getStr("SurfAlign", "thumbnailsDir", "")
+            if not thumb_dir:
+                thumb_dir = os.path.join(os.path.dirname(__file__), "pillcase_data", "color_thumbnails")
+            img_path = os.path.join(thumb_dir, filename)
             
             try:
                 from PIL import Image, ImageTk
@@ -1425,7 +1455,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         btn_f.pack(pady=10)
         
         Button(btn_f, text=_("Import Selection"), command=import_selected, width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_config_dialog, width=15).pack(side=LEFT, padx=5)
+        Button(btn_f, text=_("Settings..."), command=self.show_shiphero_and_asset_config_dialog, width=15).pack(side=LEFT, padx=5)
         Button(btn_f, text=_("Close"), command=popup.destroy, width=15).pack(side=LEFT, padx=5)
 
     def generateGcode(self):
