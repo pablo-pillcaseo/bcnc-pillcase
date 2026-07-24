@@ -1018,6 +1018,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if not hasattr(self, "_lid_defaults"):
                 self._lid_defaults = self._load_lid_defaults()
             
+            # Initialize thumbnail colors as None; fetch lazily only if needed by an item missing a color
+            available_thumb_colors = None
+            
             items_to_show = []
             for item_edge in line_items:
                 node = item_edge["node"]
@@ -1081,6 +1084,45 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                                         color = color_opt.get("value", "")
                                         break
                                 engraving_parts.append((str(opt_val), str(color)))
+                
+                # Fallback: check product_name against thumbnail filenames if color is missing
+                for i in range(len(engraving_parts)):
+                    part, color = engraving_parts[i]
+                    if not color:
+                        if available_thumb_colors is None:
+                            available_thumb_colors = []
+                            thumb_dir = Utils.getStr("SurfAlign", "thumbnailsDir", "")
+                            if thumb_dir and os.path.exists(thumb_dir):
+                                for f in os.listdir(thumb_dir):
+                                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                        c_name = f.rsplit('.', 1)[0].replace('_', ' ')
+                                        available_thumb_colors.append(c_name)
+                        
+                        found_colors = []
+                        for color_name in available_thumb_colors:
+                            idx = name.lower().find(color_name.lower())
+                            if idx != -1:
+                                actual_substring = name[idx : idx + len(color_name)]
+                                found_colors.append(actual_substring)
+                        
+                        # Filter out colors that are substrings of another found color (e.g., "Black" in "Matte Black")
+                        filtered_colors = []
+                        for c1 in found_colors:
+                            is_substring = False
+                            for c2 in found_colors:
+                                if c1 != c2 and c1.lower() in c2.lower():
+                                    is_substring = True
+                                    break
+                            if not is_substring:
+                                filtered_colors.append(c1)
+                        
+                        if len(filtered_colors) == 1:
+                            color = filtered_colors[0]
+                        elif len(filtered_colors) > 1:
+                            color = "MULTIPLE COLORS - VERIFY"
+                        
+                        engraving_parts[i] = (part, color)
+
                 if engraving_parts:
                     for part, color in engraving_parts:
                         items_to_show.append((name, part, color, sku_prefix, sku_raw, best_match_keyword, case_type_status))
@@ -1275,7 +1317,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         Label(right_frame, text="Color:", font=("", 9, "bold")).grid(row=6, column=0, sticky=NE, pady=5, padx=(0,5))
         color_frame = Frame(right_frame)
         color_frame.grid(row=6, column=1, sticky=NW, pady=5)
-        Label(color_frame, textvariable=detail_color, justify=LEFT, anchor=NW).pack(side=LEFT)
+        color_lbl = Label(color_frame, textvariable=detail_color, justify=LEFT, anchor=NW)
+        color_lbl.pack(side=LEFT)
         color_swatch = tk.Canvas(color_frame, width=32, height=32, highlightthickness=1, highlightbackground="gray")
         
         def get_color_icon(color_name, size=18):
@@ -1390,6 +1433,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 detail_name.set(original_item[0])
                 detail_engraving.set(original_item[1])
                 detail_color.set(original_item[2])
+                if original_item[2] == "MULTIPLE COLORS - VERIFY":
+                    color_lbl.config(fg="red", font=("", 9, "bold"))
+                else:
+                    color_lbl.config(fg="black", font=("", 9, "normal"))
                 update_swatch(original_item[2])
                 detail_casetype.set(original_item[3])
                 detail_raw_sku.set(original_item[4] if len(original_item) > 4 else "")
@@ -1407,6 +1454,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 detail_name.set("")
                 detail_engraving.set("")
                 detail_color.set("")
+                color_lbl.config(fg="black", font=("", 9, "normal"))
                 update_swatch("")
                 detail_casetype.set("")
                 casetype_lbl.config(fg="black")
