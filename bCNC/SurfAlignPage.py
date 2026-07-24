@@ -498,9 +498,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         col = 0
 
         # ----
-        # Order Number
-        Label(frame,
-              text=_("Order Number:")).grid(row=row, column=col, sticky=E)
+        # Order / Tote Number Label
+        mode = Utils.getStr("SurfAlign", "shipheroSearchMode", "Order")
+        lbl_txt = "Order Number:" if mode == "Order" else "Tote ID:"
+        self.searchModeLabel = Label(frame, text=_(lbl_txt))
+        self.searchModeLabel.grid(row=row, column=col, sticky=E)
         col += 1
         self.orderNumber = StringVar()
         self.orderNumber.set(Utils.getStr("SurfAlign", "orderNumber"))
@@ -941,7 +943,13 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 keyring.set_password("bCNC", f"shipheroToken_{i}", chunk)
             
             Utils.setStr("SurfAlign", "shipheroTokenParts", str(len(chunks)))
-        Utils.saveConfiguration()
+            
+        try:
+            Utils.cleanConfiguration()
+            with open(Utils.iniUser, "w") as f:
+                Utils.config.write(f)
+        except Exception:
+            pass
 
     def fetchShipHeroOrder(self, event=None):
         order_number = self.orderNumber.get().strip()
@@ -959,31 +967,64 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             messagebox.showerror(_("ShipHero"), _("ShipHero credentials not found."))   
             return
 
-        # Prepare order number (add # if missing)
-        if not order_number.startswith("#"):
-            order_number = "#" + order_number
-
-        query = """
-        query GetOrder($orderNumber: String!) {
-          orders(order_number: $orderNumber) {
-            data {
-              edges {
-                node {
-                  line_items(first: 20) {
-                    edges {
-                      node {
-                        sku
-                        product_name
-                        custom_options
+        searchMode = Utils.getStr("SurfAlign", "shipheroSearchMode", "Order")
+        
+        if searchMode == "Order":
+            # Prepare order number (add # if missing)
+            if not order_number.startswith("#"):
+                order_number = "#" + order_number
+                
+            query = """
+            query GetOrder($orderNumber: String!) {
+              orders(order_number: $orderNumber) {
+                data {
+                  edges {
+                    node {
+                      line_items(first: 20) {
+                        edges {
+                          node {
+                            sku
+                            product_name
+                            custom_options
+                          }
+                        }
                       }
                     }
                   }
                 }
               }
             }
-          }
-        }
-        """
+            """
+            variables = {"orderNumber": order_number}
+        else:
+            # Tote Mode: Totes don't usually use a # prefix
+            if order_number.startswith("#"):
+                order_number = order_number[1:]
+                
+            query = """
+            query GetToteOrders($toteId: String!) {
+              totes(search: $toteId) {
+                data {
+                  edges {
+                    node {
+                      orders {
+                        line_items(first: 20) {
+                          edges {
+                            node {
+                              sku
+                              product_name
+                              custom_options
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            variables = {"toteId": order_number}
 
         try:
             # Show a simple progress message or wait cursor
@@ -995,7 +1036,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             
             response = requests.post(
                 endpoint,
-                json={"query": query, "variables": {"orderNumber": order_number}},
+                json={"query": query, "variables": variables},
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10
             )
@@ -1007,13 +1048,27 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 messagebox.showerror(_("ShipHero Error"), error_msg)
                 return
 
-            edges = data.get("data", {}).get("orders", {}).get("data", {}).get("edges", [])
-            if not edges:
-                messagebox.showinfo(_("ShipHero"), _("No order found with number: ") + order_number)
-                return
-
-            order_node = edges[0]["node"]
-            line_items = order_node.get("line_items", {}).get("edges", [])
+            line_items = []
+            if searchMode == "Order":
+                edges = data.get("data", {}).get("orders", {}).get("data", {}).get("edges", [])
+                if not edges:
+                    messagebox.showinfo(_("ShipHero"), _("No order found with number: ") + order_number)
+                    return
+                order_node = edges[0]["node"]
+                line_items = order_node.get("line_items", {}).get("edges", [])
+            else:
+                edges = data.get("data", {}).get("totes", {}).get("data", {}).get("edges", [])
+                if not edges:
+                    messagebox.showinfo(_("ShipHero"), _("No tote found with ID or Barcode: ") + order_number)
+                    return
+                tote_node = edges[0]["node"]
+                orders_list = tote_node.get("orders") or []
+                for order_obj in orders_list:
+                    items = order_obj.get("line_items", {}).get("edges", [])
+                    line_items.extend(items)
+                if not line_items:
+                    messagebox.showinfo(_("ShipHero"), _("Tote found, but it contains no orders/items."))
+                    return
             
             if not hasattr(self, "_lid_defaults"):
                 self._lid_defaults = self._load_lid_defaults()
@@ -1146,7 +1201,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     def show_shiphero_and_asset_config_dialog(self):
         dialog = Toplevel(self)
         dialog.title(_("ShipHero & Asset Configuration"))
-        dialog.geometry("500x300")
+        dialog.geometry("500x330")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1171,8 +1226,16 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         token_var = StringVar(value=keyring.get_password("bCNC", "shipheroToken") or "")
         Entry(api_frame, textvariable=token_var, width=50, show="*").grid(row=1, column=1, sticky=W, pady=5)
         
+        Label(api_frame, text=_("Search By:")).grid(row=2, column=0, sticky=E, pady=5, padx=(0, 5))
+        search_mode_f = Frame(api_frame)
+        search_mode_f.grid(row=2, column=1, sticky=W, pady=5)
+        
+        search_mode_var = StringVar(value=Utils.getStr("SurfAlign", "shipheroSearchMode", "Order"))
+        Radiobutton(search_mode_f, text="Order Number", variable=search_mode_var, value="Order").pack(side=LEFT)
+        Radiobutton(search_mode_f, text="Tote Barcode/ID", variable=search_mode_var, value="Tote").pack(side=LEFT, padx=(10, 0))
+
         Label(api_frame, text=_("Credentials are stored securely in Windows Credential Manager."), 
-              font=("", 8, "italic"), foreground="gray").grid(row=2, column=1, sticky=W, pady=(2, 0))
+              font=("", 8, "italic"), foreground="gray").grid(row=3, column=1, sticky=W, pady=(2, 0))
 
         # -- Local Assets Group --
         asset_frame = LabelFrame(main_f, text=_("Local Assets"), padx=10, pady=10)
@@ -1203,6 +1266,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         def save():
             self.set_shiphero_credentials(endpoint_var.get().strip(), token_var.get().strip())
             Utils.setStr("SurfAlign", "thumbnailsDir", thumbnails_var.get().strip())
+            new_mode = search_mode_var.get()
+            Utils.setStr("SurfAlign", "shipheroSearchMode", new_mode)
+            if hasattr(self, 'searchModeLabel'):
+                self.searchModeLabel.config(text=_("Order Number:") if new_mode == "Order" else _("Tote ID:"))
             success[0] = True
             dialog.destroy()
 
