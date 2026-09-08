@@ -1,0 +1,106 @@
+{
+  "lids": [
+    "Weekly AM-PM Pill Case",
+    "Weekly AM-PM Vitamin Case",
+    "Weekly AM-PM Vitamin XL Case",
+    "Mission Pill Case",
+    "Mission Vitamin Case",
+    "Weekly Pill Case",
+    "Weekly 2XL Case",
+    "Weekly Vitamin Case",
+    "Weekly Vitamin XL Case",
+    "Weekly XS Pill Case"
+  ],
+  "defaults": {
+    "Weekly AM-PM Pill Case": {
+      "width": 33.53,
+      "length": 183.39,
+      "fontSize": 17,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "AMPM-PC"
+    },
+    "Weekly AM-PM Vitamin Case": {
+      "width": 40.51,
+      "length": 220.98,
+      "fontSize": 22,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "AMPM-VC"
+    },
+    "Weekly AM-PM Vitamin XL Case": {
+      "width": 46.99,
+      "length": 220.98,
+      "fontSize": 24,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "AMPM-VXL"
+    },
+    "Mission Pill Case": {
+      "width": 44.0,
+      "length": 50.0,
+      "fontSize": 20,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": 0,
+      "productCode": "MPC"
+    },
+    "Mission Vitamin Case": {
+      "width": 53.0,
+      "length": 62.0,
+      "fontSize": 24,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": 0,
+      "productCode": "MVC"
+    },
+    "Weekly Pill Case": {
+      "width": 44.45,
+      "length": 184.15,
+      "fontSize": 20,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "WPC"
+    },
+    "Weekly 2XL Case": {
+      "width": 62.23,
+      "length": 249.17,
+      "fontSize": 25,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "WV2XC"
+    },
+    "Weekly Vitamin Case": {
+      "width": 53.34,
+      "length": 220.98,
+      "fontSize": 24,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "WVC"
+    },
+    "Weekly Vitamin XL Case": {
+      "width": 53.34,
+      "length": 220.98,
+      "fontSize": 24,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "WVXC"
+    },
+    "Weekly XS Pill Case": {
+      "width": 36.58,
+      "length": 151.13,
+      "fontSize": 18,
+      "depth": null,
+      "layerHeight": null,
+      "rotation": -90,
+      "productCode": "WXSPC"
+    }
+  }
+}
