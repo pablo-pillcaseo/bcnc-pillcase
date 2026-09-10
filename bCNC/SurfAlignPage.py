@@ -1020,6 +1020,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             query = """
             query GetOrder($orderNumber: String!) {
               orders(order_number: $orderNumber) {
+                complexity
                 data(first: 1) {
                   edges {
                     node {
@@ -1049,6 +1050,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             query = """
             query GetToteOrders($toteId: String!) {
               totes(search: $toteId) {
+                complexity
                 data(first: 1) {
                   edges {
                     node {
@@ -1141,6 +1143,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if not items_to_show:
                 final_status = (_("Found, but no line items available."), True)
                 return
+
+            # `complexity` is the credit price ShipHero charged for this query,
+            # shown so an expensive query is noticed long before it runs the
+            # account out of credits mid-shift.
+            result_key = "orders" if searchMode == "Order" else "totes"
+            cost = ((data.get("data") or {}).get(result_key) or {}).get("complexity")
+            if cost is not None:
+                final_status = (_("Loaded {} lid(s) - ShipHero query cost: {} credits")
+                                .format(len(items_to_show), cost), False)
 
             self.display_shiphero_order_popup(items_to_show)
 
