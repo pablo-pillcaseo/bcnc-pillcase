@@ -1012,9 +1012,13 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if not order_number.startswith("#"):
                 order_number = "#" + order_number
                 
+            # ShipHero prices a query by what it COULD return, and a connection
+            # with no `first` is priced at 100 nodes: 100 orders x 20 line items
+            # cost 2101 credits per scan. Only edges[0] is ever read, so ask for
+            # one order and the same lookup costs about 22.
             query = """
             query GetOrder($orderNumber: String!) {
-              orders(order_number: $orderNumber) {
+              orders(order_number: $orderNumber, first: 1) {
                 data {
                   edges {
                     node {
@@ -1039,9 +1043,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             if order_number.startswith("#"):
                 order_number = order_number[1:]
                 
+            # Same pricing trap as the order query: without `first`, 100 totes are
+            # priced in. Only edges[0] is read.
             query = """
             query GetToteOrders($toteId: String!) {
-              totes(search: $toteId) {
+              totes(search: $toteId, first: 1) {
                 data {
                   edges {
                     node {
