@@ -1015,11 +1015,12 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             # ShipHero prices a query by what it COULD return, and a connection
             # with no `first` is priced at 100 nodes: 100 orders x 20 line items
             # cost 2101 credits per scan. Only edges[0] is ever read, so ask for
-            # one order and the same lookup costs about 22.
+            # one order and the same lookup costs about 22. The paging argument
+            # belongs on `data` (the connection), not on `orders` itself.
             query = """
             query GetOrder($orderNumber: String!) {
-              orders(order_number: $orderNumber, first: 1) {
-                data {
+              orders(order_number: $orderNumber) {
+                data(first: 1) {
                   edges {
                     node {
                       line_items(first: 20) {
@@ -1047,8 +1048,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             # priced in. Only edges[0] is read.
             query = """
             query GetToteOrders($toteId: String!) {
-              totes(search: $toteId, first: 1) {
-                data {
+              totes(search: $toteId) {
+                data(first: 1) {
                   edges {
                     node {
                       orders {
@@ -1088,13 +1089,19 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10
             )
-            response.raise_for_status()
-            data = response.json()
-            
-            if "errors" in data:
+            # ShipHero answers a rejected query with HTTP 400 AND a GraphQL
+            # `errors` body. Checking the status first reported only "BAD
+            # REQUEST" and threw away the reason, so read the body before it.
+            try:
+                data = response.json()
+            except ValueError:
+                response.raise_for_status()
+                raise
+            if isinstance(data, dict) and data.get("errors"):
                 error_msg = "; ".join([e.get("message", "Unknown error") for e in data["errors"]])
                 final_status = (_("ShipHero error: ") + error_msg, True)
                 return
+            response.raise_for_status()
 
             line_items = []
             if searchMode == "Order":
