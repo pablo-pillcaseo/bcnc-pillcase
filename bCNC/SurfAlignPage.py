@@ -414,6 +414,21 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         y = max(0, min(y, win.winfo_screenheight() - height))
         win.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _fit_and_center(self, win, min_width=0, min_height=0):
+        """Size a Toplevel to what its widgets ask for, then centre it.
+
+        A hard-coded geometry is a guess at the content's size, and it goes wrong
+        as soon as the content grows or Windows display scaling enlarges the
+        fonts - the bottom of the dialog, where Save/Cancel live, is what gets
+        cut off. Call this after the widgets are built; minsize then stops the
+        window from being dragged smaller than its content.
+        """
+        win.update_idletasks()
+        width = max(win.winfo_reqwidth(), min_width)
+        height = max(win.winfo_reqheight(), min_height)
+        win.minsize(width, height)
+        self._center_window(win, width, height)
+
     def _scan_status(self, msg, error=False):
         """Non-modal feedback for the scan loop: status bar text, bell on error."""
         self.app.statusbar.configText(text=msg, fill="Red" if error else "DarkBlue")
@@ -1173,8 +1188,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         dialog = Toplevel(self)
         dialog.title(_("ShipHero & Asset Configuration"))
         dialog.transient(self)
-        self._center_window(dialog, 500, 330)
-        dialog.grab_set()
+        # Hidden while it is built, then sized to its content (_fit_and_center).
+        dialog.withdraw()
 
         main_f = Frame(dialog, padx=15, pady=15)
         main_f.pack(expand=YES, fill=BOTH)
@@ -1253,6 +1268,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         Button(btn_f, text=_("Cancel"), command=cancel, width=12).pack(side=RIGHT, padx=(5, 0))
         Button(btn_f, text=_("Save"), command=save, width=12).pack(side=RIGHT, padx=(5, 5))
+
+        self._fit_and_center(dialog, min_width=500, min_height=330)
+        dialog.deiconify()
+        dialog.grab_set()
         
         self.wait_window(dialog)
         return success[0]
@@ -1741,12 +1760,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         dialog = Toplevel(self)
         dialog.title(_("Lids & Settings"))
-        # wider, shorter (space-saving vs tall)
-        dialog.geometry("560x360")
         dialog.resizable(True, True)
         dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 50, self.winfo_rooty() + 50))
+        # Hidden while it is built, then sized to its content (_fit_and_center).
+        dialog.withdraw()
 
         # ====== Top row: Add new lid (inline) ======
         top = Frame(dialog)
@@ -1787,7 +1804,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         list_frame = Frame(left)
         list_frame.pack(fill=BOTH, expand=True)
-        lid_listbox = tkinter.Listbox(list_frame, height=10)
+        # Extended selection (Ctrl/Shift-click) so a set of lids can be deleted
+        # in one go rather than one confirm-and-acknowledge round at a time.
+        lid_listbox = tkinter.Listbox(list_frame, height=10, selectmode="extended")
         lid_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar = tkinter.Scrollbar(list_frame, orient=VERTICAL, command=lid_listbox.yview)
         scrollbar.pack(side=RIGHT, fill=Y)
@@ -1797,9 +1816,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         for lid in self.lid_list:
             lid_listbox.insert(END, lid)
 
-        delete_btn = Button(left, text=_("🗑 Delete Selected Lid"), width=20,
+        delete_row = Frame(left)
+        delete_row.pack(pady=(8, 0), anchor="w")
+        delete_btn = Button(delete_row, text=_("🗑 Delete Selected"),
                             bg="#F44336", fg="white", padx=8, pady=2)
-        delete_btn.pack(pady=(8, 0), anchor="w")
+        delete_btn.pack(side=LEFT)
+        tkExtra.Balloon.set(delete_btn, _("Ctrl-click or Shift-click to select several lids"))
+        delete_all_btn = Button(delete_row, text=_("Delete All"),
+                                bg="#B71C1C", fg="white", padx=8, pady=2)
+        delete_all_btn.pack(side=LEFT, padx=(8, 0))
 
         # -- RIGHT: Defaults (compact grid)
         right = LabelFrame(content, text=_("Settings (selected lid)"), padx=8, pady=8)
@@ -1956,8 +1981,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         # ====== Helpers (selection & defaults I/O) ======
         def get_selected_lid():
+            # The settings panel edits ONE lid. With several selected (for a bulk
+            # delete) there is no single lid to show or save, so report none
+            # rather than silently acting on whichever happens to be first.
             sel = lid_listbox.curselection()
-            return lid_listbox.get(sel[0]) if sel else None
+            return lid_listbox.get(sel[0]) if len(sel) == 1 else None
 
         def load_defaults_ui_for(lid_name):
             # blank first (space-saving + clarity)
@@ -1993,7 +2021,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         def save_defaults_for_selected():
             lid_name = get_selected_lid()
             if not lid_name:
-                messagebox.showwarning(_("No Selection"), _("Please select a lid to save settings."), parent=dialog)
+                messagebox.showwarning(_("No Selection"), _("Select a single lid to save settings."), parent=dialog)
                 return
             width, length = _float_or_none(df_width.get()), _float_or_none(df_length.get())
             if (width is not None and width <= 0) or (length is not None and length <= 0):
@@ -2020,7 +2048,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         def clear_defaults_for_selected():
             lid_name = get_selected_lid()
             if not lid_name:
-                messagebox.showwarning(_("No Selection"), _("Please select a lid to clear settings."), parent=dialog)
+                messagebox.showwarning(_("No Selection"), _("Select a single lid to clear settings."), parent=dialog)
                 return
             if lid_name in self._lid_defaults:
                 for k in ("width", "length", "fontSize", "depth", "layerHeight",
@@ -2082,20 +2110,26 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             df_rotation.set("")  # NEW
             df_product.set(PillcaseOrder.choice_for_code(product))
 
+        def blank_settings():
+            for field in (df_width, df_length, df_font_size, df_depth,
+                          df_layer, df_rotation, df_product):
+                field.set("")
+
+        # Blank only when something was actually deleted: cancelling the
+        # confirmation should leave the panel showing what it showed.
         def delete_and_blank():
-            self.delete_lid_from_dialog(lid_listbox, dialog)
-            lid_listbox.selection_clear(0, END)
-            df_width.set("")
-            df_length.set("")
-            df_font_size.set("")
-            df_depth.set("")
-            df_layer.set("")
-            df_rotation.set("")
-            df_product.set("")
+            if self.delete_lid_from_dialog(lid_listbox, dialog):
+                lid_listbox.selection_clear(0, END)
+                blank_settings()
+
+        def delete_all_and_blank():
+            if self.delete_all_lids_from_dialog(lid_listbox, dialog):
+                blank_settings()
 
             # Wire buttons
         add_btn.config(command=add_and_blank)
         delete_btn.config(command=delete_and_blank)
+        delete_all_btn.config(command=delete_all_and_blank)
         save_btn.config(command=save_defaults_for_selected)
         clear_btn.config(command=clear_defaults_for_selected)
 
@@ -2115,9 +2149,17 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         except Exception:
             pass
 
+        # Measure BEFORE the pack_propagate calls below: they stop the list from
+        # reporting its size, and the window would be fitted without it. Never
+        # smaller than the original 560x360 layout ("wider, shorter").
+        self._fit_and_center(dialog, min_width=560, min_height=360)
+
         # Resize behavior
         left.pack_propagate(False)
         list_frame.pack_propagate(False)
+
+        dialog.deiconify()
+        dialog.grab_set()
 
     def validate_lid_name(self, lid_name):
         """Reject a lid name the config cannot round-trip. None when it is fine.
@@ -2162,44 +2204,63 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         messagebox.showinfo(_("Success"), _("Lid name '{}' has been added to the list.").format(new_lid_name), parent=dialog)
 
     def delete_lid_from_dialog(self, lid_listbox, dialog):
-        """Delete a selected lid name from the list."""
-        selected_index = lid_listbox.curselection()
-        if not selected_index:
-            messagebox.showwarning(_("No Selection"), _("Please select a lid to delete."), parent=dialog)
-            return
-            
-        selected_lid = lid_listbox.get(selected_index[0])
-        
-        # Confirm deletion
-        if not messagebox.askyesno(_("Confirm Delete"), 
-                                  _("Are you sure you want to delete '{}'?").format(selected_lid), 
-                                  parent=dialog):
-            return
-            
-        self.lid_list.remove(selected_lid)
+        """Delete every lid selected in the dialog's list. True when deleted."""
+        selected = [lid_listbox.get(i) for i in lid_listbox.curselection()]
+        if not selected:
+            messagebox.showwarning(_("No Selection"),
+                                   _("Please select one or more lids to delete."),
+                                   parent=dialog)
+            return False
+        return self._confirm_and_delete_lids(selected, lid_listbox, dialog)
+
+    def delete_all_lids_from_dialog(self, lid_listbox, dialog):
+        """Delete every configured lid. True when deleted."""
+        if not self.lid_list:
+            messagebox.showinfo(_("No Lids"), _("There are no lids to delete."), parent=dialog)
+            return False
+        return self._confirm_and_delete_lids(list(self.lid_list), lid_listbox, dialog,
+                                             everything=True)
+
+    def _confirm_and_delete_lids(self, lids, lid_listbox, dialog, everything=False):
+        """Remove `lids` and their saved settings as one batch. True when deleted.
+
+        One confirmation and one save for the whole batch, and no success popup —
+        the list visibly updating is the confirmation. Deleting used to cost a
+        confirm AND an acknowledgement per lid, which is what made clearing out
+        an old set of lids slow.
+        """
+        if everything:
+            prompt = _("Delete all {} lids and their settings?\n\n"
+                       "This cannot be undone. Use Export first if you may want "
+                       "them back.").format(len(lids))
+        else:
+            shown = "\n".join("• " + lid for lid in lids[:10])
+            if len(lids) > 10:
+                shown += "\n" + _("...and {} more").format(len(lids) - 10)
+            prompt = _("Delete {} lid(s) and their settings?\n\n{}").format(len(lids), shown)
+        if not messagebox.askyesno(_("Confirm Delete"), prompt, parent=dialog):
+            return False
+
+        doomed = set(lids)
+        self.lid_list[:] = [lid for lid in self.lid_list if lid not in doomed]
+        if not hasattr(self, "_lid_defaults"):
+            self._lid_defaults = self._load_lid_defaults()
+        for lid in doomed:
+            self._lid_defaults.pop(lid, None)
+        self._save_lid_defaults()
+
         self.lidName_selector['values'] = self.lid_list
-        
-        # Clear the current selection if it was the deleted one
-        if self.lidName.get() == selected_lid:
-            self.lidName.set("")
-        
-        # Refresh the listbox
         lid_listbox.delete(0, END)
         for lid in self.lid_list:
             lid_listbox.insert(END, lid)
 
-        # Also remove its saved defaults
-        try:
-            if not hasattr(self, "_lid_defaults"):
-                self._lid_defaults = self._load_lid_defaults()
-            if selected_lid in self._lid_defaults:
-                del self._lid_defaults[selected_lid]
-                self._save_lid_defaults()
-        except Exception:
-            pass
+        if self.lidName.get() in doomed:
+            self.lidName.set("")
+            # No lid is selected any more, so its outline must not linger.
+            self._on_main_lid_changed()
 
         self.saveConfig()
-        messagebox.showinfo(_("Success"), _("Lid name '{}' has been deleted from the list.").format(selected_lid), parent=dialog)
+        return True
 
     def show_add_font_folder_dialog(self):
         """Show a popup dialog for adding font folder paths."""
