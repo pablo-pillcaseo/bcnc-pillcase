@@ -183,6 +183,31 @@ class ProgressStore:
         entry["updated"] = iso(now or now_utc())
         self._write()
 
+    def all_marks(self):
+        """Every (tote_key, row_key) pair completed here - for LanSync to share."""
+        return [(key, row_key) for key, entry in self._data.items()
+                for row_key in entry.get("completed") or []]
+
+    def mark_many(self, pairs, now=None):
+        """Merge marks from elsewhere (e.g. a peer machine), one disk write total.
+
+        Only keys that actually gain a new row_key get their `updated` bumped, so
+        a peer re-announcing marks we already have can't keep resetting the prune
+        clock and defeat PROGRESS_KEEP_DAYS.
+        """
+        changed_keys = set()
+        for key, row_key in pairs:
+            entry = self._data.setdefault(key, {"completed": []})
+            if row_key not in entry["completed"]:
+                entry["completed"].append(row_key)
+                changed_keys.add(key)
+        if changed_keys:
+            ts = iso(now or now_utc())
+            for key in changed_keys:
+                self._data[key]["updated"] = ts
+            self._write()
+        return bool(changed_keys)
+
 
 # ------------------------------------------------------------------ record
 def completion_record(engraver, engraving_text, machine, lid, row, job,

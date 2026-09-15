@@ -14,7 +14,7 @@ The loop at the machine:
 
 import socket
 from tkinter import (
-    BOTH, END, LEFT, RIGHT, TOP, NW, NE, W, X, Y, YES, VERTICAL,
+    BOTH, END, LEFT, RIGHT, TOP, NW, NE, E, W, X, Y, YES, VERTICAL,
     BooleanVar, Button, Checkbutton, Entry, Frame, Label, LabelFrame, Scrollbar,
     StringVar, Toplevel, messagebox,
 )
@@ -25,6 +25,7 @@ import tkinter as tk
 import CNCRibbon
 import EngravingLog
 import EngravingSession as ES
+import LanSync
 import PillcaseOrder
 import Utils
 from Utils import _
@@ -40,6 +41,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
         self.session = ES.Session()
         self.progress = ES.ProgressStore(Utils.iniUser + "-engraving-progress.json")
+        LanSync.start(self.progress, self.machine_name())
 
         # The scanned tote/order on show
         self.rows = []
@@ -90,6 +92,12 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     # ================================================================== UI
     def _build(self):
+        # Other stations on the network, seen via LanSync - visible whether or
+        # not anyone is logged in here, unlike session_box/login_box below.
+        self.peers_var = StringVar()
+        Label(self, textvariable=self.peers_var, font=("", 8), fg="gray", anchor=E).pack(
+            side=TOP, fill=X, padx=4)
+
         # Engraver name, shift stats and Log out: shown only while logged in.
         # Station settings are under Advanced Settings (LidEngravingsFrame).
         self.session_box = Frame(self)
@@ -313,9 +321,18 @@ class EngravingFrame(CNCRibbon.PageFrame):
             elif self.session.logged_in and self.session.is_idle(self.idle_seconds()):
                 self.logout(auto=True)
             self._update_stats()
+            if LanSync.drain(self.progress):
+                self._refresh_tree()
+            self._update_peer_label()
         except Exception as e:
             print("[engraving] tick error:", repr(e))
         self.after(1000, self._tick)
+
+    def _update_peer_label(self):
+        n = LanSync.peer_count()
+        self.peers_var.set(
+            _("● %d other station%s on this network") % (n, "" if n == 1 else "s") if n
+            else _("○ no other stations detected on this network"))
 
     def _update_stats(self):
         s = self.session
@@ -609,6 +626,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
             return
 
         self.progress.mark(job["tote_key"], job["row_key"])
+        LanSync.broadcast_completion(job["tote_key"], job["row_key"])
         if self.active_job is job:
             self.active_job = None
         if job["tote_key"] == self.tote_key:
