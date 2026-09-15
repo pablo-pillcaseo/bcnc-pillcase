@@ -41,9 +41,10 @@ import zipfile
 MM_PER_INCH = 25.4
 
 # Design-package folder prefix -> the SKU product code(s) its lid engraves.
-# An AM-PM case is two halves sharing ONE lid geometry, so it is configured once
-# under the SET code; PillcaseOrder.lid_product_codes() expands that to both
-# sides when a scanned SKU decomposes.
+# An AM-PM set's two halves and its magnetic middle piece share ONE lid
+# geometry, so it is configured once under the SET code;
+# PillcaseOrder.lid_product_codes() expands that to all three pieces when a
+# scanned SKU decomposes.
 PRODUCT_CODES = {
     "SD3ULS":   ("MPC",       "Mission Pill Case"),
     "SD3ULSM":  ("MVC",       "Mission Vitamin Case"),

@@ -37,9 +37,37 @@ except Exception:  # standalone (tests, a REPL): no Tk, no translations
         return s
 
 
-# An AM-PM lid is configured once, as the SET, but a SKU decomposes to the two
-# halves — so a lid claiming 'AMPM-VC' has to answer for WVALS and WVPRS both.
-_AMPM_SET_SIDES = {p["code"]: (p["am"], p["pm"]) for p in SkuParser.AMPM_PAIRS}
+def _ampm_middle_pieces():
+    """AM-PM set code -> the magnetic middle piece of the same size.
+
+    Derived from the SKU grammar, not typed, so a new size carries over on its own.
+    Each middle piece is its size's case code with MM before the C (WVC -> WVMMC,
+    SkuParser.MMP_PARENT), and the AM-PM set of that size is the same case's title
+    with "AM-PM" added: 'Weekly Vitamin Case' -> 'Weekly AM-PM Vitamin Case'.
+    """
+    set_by_title = {p["name"].replace("AM-PM ", "").upper(): p["code"]
+                    for p in SkuParser.AMPM_PAIRS}
+    out = {}
+    for piece, parent in SkuParser.MMP_PARENT.items():
+        set_code = set_by_title.get(SkuParser.PRODUCTS.get(parent, "").upper())
+        if set_code:
+            out[set_code] = piece
+    return out
+
+
+# An AM-PM lid is configured once, as the SET, but it covers three physical
+# pieces: the AM and PM halves a SKU decomposes to, AND the magnetic middle piece
+# that joins them. The design package's center assemblies (Assy-SD7-MAGSC,
+# Assy-SD7-MAGC) use the very same lid part as the sides, so a lid claiming
+# 'AMPM-VC' has to answer for WVALS, WVPRS and WVMMC - and likewise every other
+# size's middle piece for its own set.
+#
+# The middle piece is kept out of SkuParser.AMPM_PAIRS on purpose: that grammar is
+# shared with the dashboards, where a set is counted as its two halves.
+AMPM_MIDDLE_PIECE = _ampm_middle_pieces()
+_AMPM_SET_PIECES = {
+    p["code"]: tuple(c for c in (p["am"], p["pm"], AMPM_MIDDLE_PIECE.get(p["code"])) if c)
+    for p in SkuParser.AMPM_PAIRS}
 
 
 # Line-item classes that are never a lid under the laser, so they never become a
@@ -465,14 +493,15 @@ def configured_product_code(cfg):
 def lid_product_codes(cfg):
     """Every product code a configured lid covers, for matching a parsed SKU.
 
-    An AM-PM lid is configured once as the SET, but a SKU decomposes to the two
-    halves — so the set expands to both here.
+    An AM-PM lid is configured once as the SET, but a SKU decomposes to the
+    individual pieces — so the set expands here to both halves and the magnetic
+    middle piece, which all take the same lid.
     """
     code = configured_product_code(cfg)
     if not code:
         return frozenset()
-    if code in _AMPM_SET_SIDES:
-        return frozenset(_AMPM_SET_SIDES[code])
+    if code in _AMPM_SET_PIECES:
+        return frozenset(_AMPM_SET_PIECES[code])
     return frozenset([code])
 
 
