@@ -3694,36 +3694,44 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.stop_quick_align = False
         self.quick_align_active = True
 
-        no_of_points = int(self.n_probe_points.get())
-        polynomial_degree = int(self.polynomial_degree.get())
-        # Not `_`: that would make the translation function local to this method
-        is_valid, message, _unused = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
-        if not is_valid:
-            self.quick_align_active = False
-            messagebox.showerror(_("Probe Configuration Error"), message)
-            return False
-
-        # Step 1: generate points (no plot)
-        success = self.generate_probe(show_plot=False)
-        print("PROBE POINTS GENERATED", success)
-        if not success or self.check_quick_align_stop():
-            self.quick_align_active = False
-            return
-
-        # Step 2: start probing
         try:
-            self.app.gcode.probe.start_multi_point_scan = True
-        except Exception:
-            pass
+            no_of_points = int(self.n_probe_points.get())
+            polynomial_degree = int(self.polynomial_degree.get())
+            # Not `_`: that would make the translation function local to this method
+            is_valid, message, _unused = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
+            if not is_valid:
+                self.quick_align_active = False
+                messagebox.showerror(_("Probe Configuration Error"), message)
+                return False
 
-        success = self.start_probing()
-        print("PROBING STARTED", success)
-        if not success or self.check_quick_align_stop():
+            # Step 1: generate points (no plot)
+            success = self.generate_probe(show_plot=False)
+            print("PROBE POINTS GENERATED", success)
+            if not success or self.check_quick_align_stop():
+                self.quick_align_active = False
+                return
+
+            # Step 2: start probing
+            try:
+                self.app.gcode.probe.start_multi_point_scan = True
+            except Exception:
+                pass
+
+            success = self.start_probing()
+            print("PROBING STARTED", success)
+            if not success or self.check_quick_align_stop():
+                self.quick_align_active = False
+                return
+
+            # Step 3: poll probing status
+            self._poll_id = self.app.after(1000, self._poll_probe_status)
+        except Exception as e:
+            # Left set, this would wrongly report "machine is running" on every
+            # later Enter/preview attempt, with no run and no way to clear it
+            # short of restarting the app.
             self.quick_align_active = False
-            return
-
-        # Step 3: poll probing status
-        self._poll_id = self.app.after(1000, self._poll_probe_status)
+            print("[quick-align] setup failed:", repr(e))
+            self.app.setStatus(_("Align & Run failed while setting up probing - try again."))
 
     def _poll_probe_status(self):
         if self.check_quick_align_stop():
@@ -3736,15 +3744,31 @@ class MultiPointProbe(CNCRibbon.PageFrame):
             pass
         print("PROBING COMPLETED")
 
-        # Retract on normal completion
-        self._retract_probe("[COMPLETE]")
+        try:
+            # Retract on normal completion
+            self._retract_probe("[COMPLETE]")
 
-        self._process_id = self.app.after(5000, self._process_alignment_results)
+            self._process_id = self.app.after(5000, self._process_alignment_results)
+        except Exception as e:
+            # Same reasoning as quick_align_run's guard: never leave this stuck
+            # True on an unexpected error, or every future Enter falsely warns
+            # "the machine is running".
+            self.quick_align_active = False
+            print("[quick-align] post-probe step failed:", repr(e))
+            self.app.setStatus(_("Align & Run failed after probing - try again."))
 
     def _process_alignment_results(self):
         if self.check_quick_align_stop():
             return
 
+        try:
+            self._process_alignment_results_body()
+        except Exception as e:
+            self.quick_align_active = False
+            print("[quick-align] processing alignment results failed:", repr(e))
+            self.app.setStatus(_("Align & Run failed while processing probe results - try again."))
+
+    def _process_alignment_results_body(self):
         self.app.gcode.x_probe_to_tool_offset = float(self.x_probe_to_tool_offset.get() or 0)
         self.app.gcode.y_probe_to_tool_offset = float(self.y_probe_to_tool_offset.get() or 0)
         self.app.gcode.z_probe_to_tool_offset = float(self.z_probe_to_tool_offset.get() or 0)

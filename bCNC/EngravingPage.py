@@ -194,6 +194,15 @@ class EngravingFrame(CNCRibbon.PageFrame):
         tree.bind("<<TreeviewSelect>>", self._on_select)
         tree.bind("<Double-1>", self.engrave_selected)
         tree.bind("<Return>", self.engrave_selected)
+        # ttk.Treeview's own Up/Down bindings don't stop the key from also
+        # reaching bCNC's toplevel jog bindings (acceptKey() doesn't know about
+        # Treeview), so without an explicit "break" here, arrow-keying through
+        # this list jogs the mill. Left/Right have no meaning in this flat
+        # list, so they're just swallowed rather than remapped.
+        tree.bind("<Up>", lambda e: self._move_selection(-1))
+        tree.bind("<Down>", lambda e: self._move_selection(1))
+        tree.bind("<Left>", lambda e: "break")
+        tree.bind("<Right>", lambda e: "break")
 
         self.hide_non_engraving = BooleanVar(value=True)
         Checkbutton(box, text=_("Hide non-engraving items"), variable=self.hide_non_engraving,
@@ -322,6 +331,12 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._update_stats()
             if LanSync.drain(self.progress):
                 self._refresh_tree()
+                # A peer just finished the last lid of the tote open here too -
+                # get it ready to be replaced, without yanking focus away from
+                # whatever this station's operator is doing right now.
+                if (self.tote_key and any(ES.has_engraving(r) for r in self.rows)
+                        and not self._remaining()):
+                    self._select_tote_text()
             self._update_peer_label()
         except Exception as e:
             print("[engraving] tick error:", repr(e))
@@ -353,6 +368,15 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.scan_entry.focus_set()
         self.scan_entry.select_range(0, END)
         self.scan_entry.icursor(END)
+
+    def _select_tote_text(self):
+        """Select the scan field's text without taking focus or switching pages -
+        a peer finishing this tote shouldn't yank this station away from
+        whatever its operator is doing. A scan/type here still replaces it."""
+        try:
+            self.scan_entry.select_range(0, END)
+        except Exception:
+            pass
 
     def scan(self, event=None):
         self._gen().fetchShipHeroOrder(self.scan_entry.get())
@@ -460,6 +484,20 @@ class EngravingFrame(CNCRibbon.PageFrame):
         for iid in selected:
             if tree.exists(iid):
                 tree.selection_set(iid)
+
+    def _move_selection(self, delta):
+        """Up/Down in the list, in place of the mill-jog binding they'd otherwise hit."""
+        children = self.tree.get_children()
+        if not children:
+            return "break"
+        current = self.tree.focus() or (self.tree.selection() or (None,))[0]
+        idx = children.index(current) if current in children else -1
+        idx = max(0, min(len(children) - 1, idx + delta))
+        target = children[idx]
+        self.tree.selection_set(target)
+        self.tree.focus(target)
+        self.tree.see(target)
+        return "break"
 
     def _select_next(self):
         remaining = set(self._remaining())
@@ -632,14 +670,15 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
         left = len(self._remaining())
         if left:
-            self._show()
             self._select_next()
             self._status(_("✓ '%s' engraved - %d left. Pick the next case.") % (text, left))
         else:
             noun = _("Tote") if job["search_mode"] == "Tote" else _("Order")
             self._status(_("✓ '%s' engraved - %s %s complete. Scan the next one.")
                          % (text, noun, job["scan"]))
-            self.focus_scan()
+        # Always - not just once the tote is done - because this machine may be
+        # about to scan a different tote before the others finish this one.
+        self.focus_scan()
 
     # ============================================================ settings
     def show_settings_dialog(self):
