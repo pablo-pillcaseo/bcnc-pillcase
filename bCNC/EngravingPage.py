@@ -92,12 +92,6 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     # ================================================================== UI
     def _build(self):
-        # Other stations on the network, seen via LanSync - visible whether or
-        # not anyone is logged in here, unlike session_box/login_box below.
-        self.peers_var = StringVar()
-        Label(self, textvariable=self.peers_var, font=("", 8), fg="gray", anchor=E).pack(
-            side=TOP, fill=X, padx=4)
-
         # Engraver name, shift stats and Log out: shown only while logged in.
         # Station settings are under Advanced Settings (LidEngravingsFrame).
         self.session_box = Frame(self)
@@ -106,6 +100,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.who_var = StringVar()
         Label(bar, textvariable=self.who_var, font=("", 12, "bold"), anchor=W).pack(side=LEFT)
         Button(bar, text=_("Log out"), command=self.logout).pack(side=RIGHT, padx=2)
+        # Other stations on the network, seen via LanSync - just a dot and a
+        # count, packed right after (so immediately left of) Log out.
+        self.peers_var = StringVar()
+        self.peers_lbl = Label(bar, textvariable=self.peers_var, font=("", 9))
+        self.peers_lbl.pack(side=RIGHT, padx=(0, 6))
         self.stats_var = StringVar()
         Label(self.session_box, textvariable=self.stats_var, anchor=W, fg="gray").pack(side=TOP, fill=X)
 
@@ -330,9 +329,8 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     def _update_peer_label(self):
         n = LanSync.peer_count()
-        self.peers_var.set(
-            _("● %d other station%s on this network") % (n, "" if n == 1 else "s") if n
-            else _("○ no other stations detected on this network"))
+        self.peers_var.set("● %d" % n)
+        self.peers_lbl.config(fg="#1a7f37" if n else "gray")
 
     def _update_stats(self):
         s = self.session
