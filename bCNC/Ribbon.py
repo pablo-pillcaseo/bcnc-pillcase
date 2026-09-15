@@ -356,6 +356,7 @@ class Page:  # <--- should be possible to be a toplevel as well
         MenuButton,
     )
     _name_ = None
+    _label_ = None
     _icon_ = None
     _doc_ = "Tooltip"
 
@@ -658,7 +659,9 @@ class TabRibbonFrame(Frame):
         page._tab = TabButton(
             self._tabFrame,
             image=page._icon,
-            text=_(page.name),
+            # _label_ renames a tab on screen without renaming the page, whose
+            # name is also its config key and what changePage() looks up
+            text=_(getattr(page, "_label_", None) or page.name),
             compound=LEFT,
             value=page.name,
             variable=self.activePage,

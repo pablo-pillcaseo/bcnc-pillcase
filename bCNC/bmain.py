@@ -77,7 +77,6 @@ from EditorPage import EditorPage
 from FilePage import FilePage
 from ProbePage import ProbePage
 from SurfAlignPage import SurfAlignPage
-from EngravingPage import EngravingPage
 from Sender import NOT_CONNECTED, STATECOLOR, STATECOLORDEF, Sender
 from TerminalPage import TerminalPage
 from ToolsPage import Tools, ToolsPage
@@ -248,7 +247,6 @@ class Application(Tk, Sender):
             FilePage,
             ProbePage,
             SurfAlignPage,
-            EngravingPage,
             TerminalPage,
             ToolsPage,
         ):
@@ -265,7 +263,12 @@ class Application(Tk, Sender):
                 except KeyError:
                     errors.append(n)
 
-            for n in Utils.getStr(Utils.__prg__, f"{page.name}.page").split():
+            names = Utils.getStr(Utils.__prg__, f"{page.name}.page").split()
+            if page.name == "SurfAlign":
+                # Its frames now live inside one scrolling page, which a saved
+                # ~/.bCNC listing them one by one would break.
+                names = ["LidEngravings*"]
+            for n in names:
                 last = n[-1]
                 if ((n == "abcDRO" or n == "abcControl")
                         and CNC.enable6axisopt is False):
@@ -304,12 +307,12 @@ class Application(Tk, Sender):
         self.autolevel = Page.frames["Probe:Autolevel"]
 
         # Left side
-        ribbon = Utils.getStr(Utils.__prg__, "ribbon").split()
-        # A saved ~/.bCNC ribbon predates the Engraving tab; the scan loop needs
-        # it, so it goes in beside SurfAlign rather than silently missing.
-        if "Engraving" not in ribbon:
-            at = ribbon.index("SurfAlign") + 1 if "SurfAlign" in ribbon else len(ribbon)
-            ribbon.insert(at, "Engraving")
+        # The Engraving tab is now part of SurfAlign (Lid Engravings), but a saved
+        # ~/.bCNC can still name it - as a tab, or as the page last open.
+        ribbon = [n for n in Utils.getStr(Utils.__prg__, "ribbon").split()
+                  if n.rstrip(">") != "Engraving"]
+        if "SurfAlign" not in ribbon:
+            ribbon.append("SurfAlign")
         for name in ribbon:
             # print("Ribbon name: ", name)
             last = name[-1]
@@ -323,7 +326,8 @@ class Application(Tk, Sender):
         # Restore last page
         # Select "Probe:Probe" tab to show the dialogs!
         self.pages["Probe"].tabChange()
-        self.ribbon.changePage(Utils.getStr(Utils.__prg__, "page", "File"))
+        last_page = Utils.getStr(Utils.__prg__, "page", "File")
+        self.ribbon.changePage("SurfAlign" if last_page == "Engraving" else last_page)
 
         probe = Page.frames["Probe:Probe"]
         tkExtra.bindEventData(

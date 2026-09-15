@@ -1,15 +1,15 @@
-"""Engraving tab: engraver login and the scanned tote's list of lids.
+"""Tote Scanning: engraver login and the scanned tote's list of lids.
 
+This frame is the Tote Scanning section of the Lid Engravings tab (SurfAlignPage).
 The loop at the machine:
   1. The engraver logs in here - tap a name, or scan / type it - as at the logger's
      station tablet. A scan with nobody logged in lands here first.
-  2. A tote/order scan (from this tab or the SurfAlign field) is looked up in
-     ShipHero and its lids are listed here; the tab comes forward on its own.
-  3. Engrave Selected fills SurfAlign's fields, switches to SurfAlign and generates
-     the G-code. The engraver runs it with the usual button.
+  2. A tote/order scan is looked up in ShipHero and its lids are listed here.
+  3. Engrave Selected fills the G-code fields and generates the preview. The
+     engraver checks it and presses Align & Run.
   4. When that program finishes without error the lid is crossed off, a completion
-     record is handed to EngravingLog, and - only if lids are still left - this
-     tab comes forward again with the next one selected.
+     record is handed to EngravingLog, and the next lid is selected - or, once the
+     tote is done, the scan field is ready for the next tote.
 """
 
 import socket
@@ -79,45 +79,48 @@ class EngravingFrame(CNCRibbon.PageFrame):
     def _status(self, msg, error=False):
         self._gen()._scan_status(msg, error)
 
+    def _page(self):
+        return getattr(self.app, "lid_engravings", None)
+
+    def _show(self):
+        """Bring Tote Scanning forward, open and scrolled into view."""
+        page = self._page()
+        if page is not None:
+            page.show_scanning()
+
     # ================================================================== UI
     def _build(self):
-        bar = Frame(self)
+        # Engraver name, shift stats and Log out: shown only while logged in.
+        # Station settings are under Advanced Settings (LidEngravingsFrame).
+        self.session_box = Frame(self)
+        bar = Frame(self.session_box)
         bar.pack(side=TOP, fill=X, pady=(4, 0))
         self.who_var = StringVar()
         Label(bar, textvariable=self.who_var, font=("", 12, "bold"), anchor=W).pack(side=LEFT)
-        Button(bar, text="⚙", width=2, command=self.show_settings_dialog).pack(side=RIGHT)
-        self.logout_btn = Button(bar, text=_("Log out"), command=self.logout)
-
+        Button(bar, text=_("Log out"), command=self.logout).pack(side=RIGHT, padx=2)
         self.stats_var = StringVar()
-        Label(self, textvariable=self.stats_var, anchor=W, fg="gray").pack(side=TOP, fill=X)
+        Label(self.session_box, textvariable=self.stats_var, anchor=W, fg="gray").pack(side=TOP, fill=X)
 
         self._build_login()
         self._build_work()
 
     def _build_login(self):
+        # Name buttons, plus an entry for a badge scan or a typed name
         box = self.login_box = Frame(self)
-        Label(box, text=_("Who's engraving at this machine?"),
-              font=("", 13, "bold"), anchor=W).pack(fill=X, pady=(8, 0))
-        Label(box, text=_("Tap your name - or scan / type it below."),
-              fg="gray", anchor=W).pack(fill=X)
         self.names_frame = Frame(box)
-        self.names_frame.pack(fill=X, pady=8)
-        Label(box, text=_("- or scan badge / type name -"), fg="gray").pack()
+        self.names_frame.pack(fill=X, pady=(6, 4))
         f = Frame(box)
-        f.pack(fill=X, pady=4)
+        f.pack(fill=X, pady=(0, 4))
         self.badge = Entry(f, font=("", 13))
         self.badge.pack(side=LEFT, fill=X, expand=YES)
         self.badge.bind("<Return>", self._login_from_entry)
         Button(f, text=_("Start"), command=self._login_from_entry).pack(side=LEFT, padx=(4, 0))
-        self.login_msg = StringVar()
-        Label(box, textvariable=self.login_msg, fg="red", anchor=W, justify=LEFT,
-              wraplength=320).pack(fill=X)
 
     def _build_work(self):
         box = self.work_box = Frame(self)
 
         sf = Frame(box)
-        sf.pack(side=TOP, fill=X, pady=(8, 4))
+        sf.pack(side=TOP, fill=X, pady=(4, 2))
         self.scan_label = Label(sf, text=self._scan_label_text())
         self.scan_label.pack(side=LEFT)
         self.scan_entry = Entry(sf, font=("", 12))
@@ -130,7 +133,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
         self.tote_var = StringVar(value=_("Scan a tote to list its engravings."))
         self.tote_lbl = Label(box, textvariable=self.tote_var, font=("", 11, "bold"),
-                              anchor=W, justify=LEFT, wraplength=340)
+                              anchor=W, justify=LEFT, wraplength=300)
         self.tote_lbl.pack(side=TOP, fill=X)
 
         # Above the list, so it stays on screen however short the window is: Tk
@@ -141,8 +144,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.engrave_btn.pack(side=TOP, fill=X, pady=(4, 0))
         self.addWidget(self.engrave_btn)
         self.warn_var = StringVar()
-        Label(box, textvariable=self.warn_var, fg="red", anchor=W, justify=LEFT,
-              wraplength=340).pack(side=TOP, fill=X)
+        warn_lbl = Label(box, textvariable=self.warn_var, fg="red", anchor=W, justify=LEFT,
+                         wraplength=300)
+        # Takes a line only while there is a warning to show
+        self.warn_var.trace_add("write", lambda *a: warn_lbl.pack(
+            side=TOP, fill=X, after=self.engrave_btn) if self.warn_var.get() else warn_lbl.pack_forget())
 
         style = ttk.Style()
         style.configure("EngravingItems.Treeview", rowheight=24)
@@ -153,21 +159,22 @@ class EngravingFrame(CNCRibbon.PageFrame):
             ]})
         ])
         tc = Frame(box)
-        # Fixed height, so the details sit directly under the list instead of at
-        # the bottom edge of a tall window.
-        tc.pack(side=TOP, fill=X, pady=4)
+        # Fixed and short, so the preview controls and Align & Run below Tote
+        # Scanning stay on screen; a bigger tote scrolls the list.
+        tc.pack(side=TOP, fill=X, pady=2)
         tree = self.tree = ttk.Treeview(tc, style="EngravingItems.Treeview",
                                         columns=("Engraving", "Order"),
-                                        show="tree headings", height=8)
+                                        show="tree headings", height=5)
         tree.heading("#0", text=_("Case Type / Colour"))
-        tree.column("#0", width=190, minwidth=120)
+        tree.column("#0", width=160, minwidth=120)
         tree.heading("Engraving", text=_("Engraving"))
         tree.column("Engraving", width=80, minwidth=50)
         tree.heading("Order", text=_("Order"))
-        tree.column("Order", width=75, minwidth=50)
-        tree.pack(side=LEFT, fill=BOTH, expand=YES)
+        tree.column("Order", width=60, minwidth=45)
+        # Scrollbar packed first: packed after, a wide list squeezes it out.
         sb = Scrollbar(tc, orient=VERTICAL, command=tree.yview)
         sb.pack(side=RIGHT, fill=Y)
+        tree.pack(side=LEFT, fill=BOTH, expand=YES)
         tree.configure(yscrollcommand=sb.set)
 
         done_font = tkFont.nametofont("TkDefaultFont").copy()
@@ -212,7 +219,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         cf.grid(row=1, column=1, sticky=NW, pady=2)
         self.colour_lbl = Label(cf, textvariable=self.d_colour, justify=LEFT, anchor=NW)
         self.colour_lbl.pack(side=LEFT)
-        self.swatch = tk.Canvas(cf, width=48, height=48, highlightthickness=1, highlightbackground="gray")
+        self.swatch = tk.Canvas(cf, width=36, height=36, highlightthickness=1, highlightbackground="gray")
 
         row(_("Engraving:"), self.d_engraving, 2)
 
@@ -245,22 +252,19 @@ class EngravingFrame(CNCRibbon.PageFrame):
     def _show_session(self):
         if self.session.logged_in:
             self.who_var.set("▣ " + self.session.engraver)
-            self.logout_btn.pack(side=RIGHT, padx=2)
             self.login_box.pack_forget()
+            self.session_box.pack(side=TOP, fill=X)
             self.scan_label.config(text=self._scan_label_text())
             self.work_box.pack(side=TOP, fill=BOTH, expand=YES)
         else:
-            self.who_var.set(_("not logged in"))
-            self.logout_btn.pack_forget()
+            self.session_box.pack_forget()
             self.work_box.pack_forget()
             self._render_names()
             self.login_box.pack(side=TOP, fill=BOTH, expand=YES)
         self._update_stats()
 
     def _login_from_entry(self, event=None):
-        name = self.badge.get().strip()
-        self.badge.delete(0, END)
-        self.login(name)
+        self.login(self.badge.get())
         return "break"
 
     def login(self, name):
@@ -268,20 +272,19 @@ class EngravingFrame(CNCRibbon.PageFrame):
         if not name:
             return
         if not ES.valid_engraver_name(name):
-            self.login_msg.set(_("That doesn't look like a name - tap your name button."))
+            # Leave the bad value selected, so the next scan or typing replaces it
             self.bell()
             self.badge.focus_set()
+            self.badge.select_range(0, END)
             return
+        self.badge.delete(0, END)
         self.session.login(name)
-        self.login_msg.set("")
         self._show_session()
-        self._status(_("✓ %s - you're on. Now scan totes.") % name)
+        self._status(_("✓ %s logged in") % name)
 
         pending, self._pending_scan = self._pending_scan, None
         if pending:
-            gen = self._gen()
-            gen.orderNumber.set(pending)
-            gen.fetchShipHeroOrder()
+            self._gen().fetchShipHeroOrder(pending)
         else:
             self.focus_scan()
 
@@ -297,10 +300,9 @@ class EngravingFrame(CNCRibbon.PageFrame):
     def require_login(self, pending_scan=None):
         """A scan arrived with nobody logged in: ask for a name, keep the scan."""
         self._pending_scan = pending_scan or None
-        self.app.ribbon.changePage("Engraving")
+        self._show()
         self._show_session()
-        self.login_msg.set(_("Log in first - your scan loads as soon as you do."))
-        self._status(_("Log in on the Engraving tab before scanning."), error=True)
+        self.bell()
         self.badge.focus_set()
 
     def _tick(self):
@@ -318,7 +320,6 @@ class EngravingFrame(CNCRibbon.PageFrame):
     def _update_stats(self):
         s = self.session
         if not s.logged_in:
-            self.stats_var.set(_("Auto logs out after %d min idle.") % round(self.idle_seconds() / 60))
             return
         secs = int((ES.now_utc() - s.since).total_seconds())
         h, m, sec = secs // 3600, secs % 3600 // 60, secs % 60
@@ -329,6 +330,8 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     # ================================================================ scan
     def focus_scan(self):
+        """Put the operator on the scan field, old value selected so a scan replaces it."""
+        self._show()
         if not self.session.logged_in:
             self.badge.focus_set()
             return
@@ -337,14 +340,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.scan_entry.icursor(END)
 
     def scan(self, event=None):
-        value = self.scan_entry.get().strip()
-        gen = self._gen()
-        gen.orderNumber.set(value)
-        gen.fetchShipHeroOrder()
+        self._gen().fetchShipHeroOrder(self.scan_entry.get())
         return "break"
 
     def load_order(self, scan_value, search_mode, rows):
-        """Show a looked-up tote/order and bring this tab forward to pick a lid."""
+        """Show a looked-up tote/order, ready to pick a lid."""
         self.scan_value = str(scan_value or "").strip()
         self.search_mode = search_mode
         self.tote_key = ES.scan_key(search_mode, self.scan_value)
@@ -357,7 +357,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.scan_entry.insert(0, self.scan_value)
         self.warn_var.set("")
         self._refresh_tree()
-        self.app.ribbon.changePage("Engraving")
+        self._show()
         self._select_next()
 
     # ================================================================ list
@@ -481,7 +481,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.case_lbl.config(fg="black" if row.get("case_type") else "red")
         self.d_colour.set(row.get("colour_name") or _("Not resolved"))
         self.colour_lbl.config(fg="black" if row.get("colour_name") else "red")
-        icon = self._colour_icon(row, size=48)
+        icon = self._colour_icon(row, size=36)
         if icon:
             self.swatch.pack(side=LEFT, padx=(10, 0))
             self.swatch.image = icon
@@ -506,12 +506,13 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     # ============================================================= engrave
     def engrave_selected(self, event=None):
-        """Send the selected lid to SurfAlign and generate its G-code."""
+        """Fill the G-code fields from the selected lid and generate its preview."""
         i, row = self._selected()
         if row is None:
             self._warn(_("Select a case first."))
             return "break"
-        if self.app.running:
+        page = self._page()
+        if self.app.running or (page is not None and page.busy()):
             self._warn(_("The machine is running - wait for it to finish."))
             return "break"
         if not ES.has_engraving(row):
@@ -540,7 +541,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.session.touch()
         self.warn_var.set("")
 
-        # SurfAlign first: loading G-code only skips its probe-data prompt there.
+        # Loading G-code only skips the probe-data prompt with this page active.
         self.app.ribbon.changePage("SurfAlign")
         self._status(_("Imported '%s' on %s - generating GCode...") % (text, lid))
         try:
@@ -549,8 +550,10 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._status(_("GCode generation failed: ") + str(e), error=True)
         else:
             if ok:
-                self._status(_("Ready - GCode generated for '%s' on %s. Press Quick Align & Run.")
+                self._status(_("Ready - check the preview for '%s' on %s, then press Align & Run.")
                              % (text, lid))
+                if page is not None:
+                    page.show_run()
             else:
                 self._status(_("GCode generation failed - fields imported, not generated."), error=True)
         return "break"
@@ -613,14 +616,14 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
         left = len(self._remaining())
         if left:
-            self.app.ribbon.changePage("Engraving")
+            self._show()
             self._select_next()
             self._status(_("✓ '%s' engraved - %d left. Pick the next case.") % (text, left))
         else:
             noun = _("Tote") if job["search_mode"] == "Tote" else _("Order")
             self._status(_("✓ '%s' engraved - %s %s complete. Scan the next one.")
                          % (text, noun, job["scan"]))
-            self._gen()._focus_scan_field()
+            self.focus_scan()
 
     # ============================================================ settings
     def show_settings_dialog(self):
@@ -675,12 +678,3 @@ class EngravingFrame(CNCRibbon.PageFrame):
         dialog.deiconify()
         dialog.grab_set()
         self.wait_window(dialog)
-
-
-class EngravingPage(CNCRibbon.Page):
-    __doc__ = _("Engraver login and the scanned tote's engravings")
-    _name_ = "Engraving"
-    _icon_ = "pencil"
-
-    def register(self):
-        self._register(None, (EngravingFrame,))

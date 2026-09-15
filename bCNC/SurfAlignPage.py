@@ -121,6 +121,10 @@ CAMERA_LOCATION_ORDER = [
     "Bottom-Right",
 ]
 
+FONT_SIZE_STEP = 0.5            # Font Size -/+ buttons
+NUDGE_STEPS = ("0.1", "0.5", "1")  # mm per nudge arrow press
+PREVIEW_DELAY_MS = 700          # quiet time after an adjustment before regenerating
+
 
 # =============================================================================
 # Probe Tab Group
@@ -439,13 +443,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     def _focus_scan_field(self):
         """Return focus to the scan entry, selected, ready for the next scan."""
         engraving = getattr(self.app, "engraving", None)
-        if engraving is not None and self.app.ribbon.getActivePage().name == "Engraving":
+        if engraving is not None:
             engraving.focus_scan()
-            return
-        entry = GenGcodeFrame.orderNumber
-        entry.focus_set()
-        entry.select_range(0, END)
-        entry.icursor(END)
 
     def _on_main_lid_changed(self, event=None):
         """When user selects a lid in the main UI, apply its defaults."""
@@ -538,10 +537,16 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         return font_dict
 
-    def __init__(self, master, app):
+    def __init__(self, master, app, common=None):
         CNCRibbon.PageFrame.__init__(self, master, "GenGcode", app)
 
         self.app.surfalign_gen_gcode_frame = self
+        self._preview_id = None
+        self._generated_key = None
+
+        # The few fields an engraver checks against the preview live in `common`,
+        # always on show; everything else is in this frame, under Advanced Settings.
+        self._build_common(common if common is not None else self)
 
         lframe = tkExtra.ExLabelFrame(
             self, text=_("GCode"), foreground="DarkBlue")
@@ -552,87 +557,14 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         row = 0
         col = 0
 
-        # ----
-        # Order / Tote Number Label
-        mode = Utils.getStr("SurfAlign", "shipheroSearchMode", "Order")
-        lbl_txt = "Order Number:" if mode == "Order" else "Tote ID:"
-        self.searchModeLabel = Label(frame, text=_(lbl_txt))
-        self.searchModeLabel.grid(row=row, column=col, sticky=E)
-        col += 1
-        self.orderNumber = StringVar()
-        self.orderNumber.set(Utils.getStr("SurfAlign", "orderNumber"))
-
-        GenGcodeFrame.orderNumber = Entry(
-            frame,
-            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
-            width=5,
-            textvariable=self.orderNumber,
-        )
-        GenGcodeFrame.orderNumber.grid(row=row, column=col, sticky=EW)
-        # Bind Enter key to fetch order from ShipHero
-        GenGcodeFrame.orderNumber.bind('<Return>', lambda event: self.fetchShipHeroOrder())
-        tkExtra.Balloon.set(
-            GenGcodeFrame.orderNumber,
-            _("Enter order number and press Enter to fetch from ShipHero"),
-        )
-        self.addWidget(GenGcodeFrame.orderNumber)
-
-        col += 1
-        btnFrame = Frame(frame)
-        btnFrame.grid(row=row, column=col, sticky=EW)
-
-        self.fetchOrderBtn = Button(btnFrame, text="🔍", command=self.fetchShipHeroOrder, width=2, height=1)
-        self.fetchOrderBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
-        tkExtra.Balloon.set(self.fetchOrderBtn, _("Fetch order details from ShipHero"))
-        self.addWidget(self.fetchOrderBtn)
-
-        self.shipHeroSettingsBtn = Button(btnFrame, text="⚙️", command=self.show_shiphero_and_asset_config_dialog, width=2, height=1)
-        self.shipHeroSettingsBtn.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 0))
-        tkExtra.Balloon.set(self.shipHeroSettingsBtn, _("ShipHero & Asset Configuration"))
-        self.addWidget(self.shipHeroSettingsBtn)
-
-
-        # ----
-        # Engrave Text
-        row += 1
-        col = 0
-        Label(frame,
-              text=_("Engrave Text:")).grid(row=row, column=col, sticky=E)
-        col += 1
-        self.engraveText = StringVar()
-        GenGcodeFrame.engraveText = Entry(
-            frame,
-            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
-            width=5,
-            textvariable=self.engraveText,
-        )
-        GenGcodeFrame.engraveText.grid(row=row, column=col, sticky=EW)
-        # Bind Enter key to generate GCode
-        GenGcodeFrame.engraveText.bind('<Return>', lambda event: self.generateGcode())
-        tkExtra.Balloon.set(
-            GenGcodeFrame.engraveText,
-            _("Text to engrave. Use | to separate words with spacing. Use <|> for literal pipe character."),
-        )
-        self.addWidget(GenGcodeFrame.engraveText)
-
-        # Add info button for text syntax help
-        col += 1
-        info_button = Button(frame, text="ℹ", font=("TkDefaultFont", 8, "bold"), 
-                            command=self.show_text_syntax_help, width=2, height=1)
-        info_button.grid(row=row, column=col, sticky=W, padx=(2, 0))
-        tkExtra.Balloon.set(info_button, _("Click for detailed text syntax help"))
-        self.addWidget(info_button)
-
         # Font selection dropdown
-        row += 1
-        col = 0
         Label(lframe(), text=_("Font:")).grid(row=row, column=col, sticky=E)
         col += 1
-        
+
         # Load fonts folders from config
         fonts_folders_str = Utils.getStr("SurfAlign", "fontsFolders")
         self.fonts_folders = [folder.strip() for folder in fonts_folders_str.split(",") if folder.strip()] if fonts_folders_str else []
-        
+
         self.all_font_dict = {}
         for fonts_folder in self.fonts_folders:
             self.all_font_dict.update(self.load_fonts_from_folder(fonts_folder))
@@ -653,28 +585,15 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.font_selector.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.font_selector, _("Select font for engraving text"))
         self.addWidget(self.font_selector)
-        
+
         col += 1
-        
+
         # Add Font Folder button
         add_font_folder_button = Button(lframe(), text=_("Add Font Folder"), command=self.show_add_font_folder_dialog, padx=2, pady=1)
         add_font_folder_button.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(add_font_folder_button, _("Add a new font folder path"))
         self.addWidget(add_font_folder_button)
 
-        # ----
-        # Font Size 
-        row += 1
-        col = 0
-        Label(lframe(), text=_("Font Size:")).grid(row=row, column=col, sticky=E)
-        col += 1
-        self.fontSize = tkExtra.FloatEntry(
-            lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
-        self.fontSize.grid(row=row, column=col, sticky=EW)
-        tkExtra.Balloon.set(
-            self.fontSize, _("Engrave Text Size"))
-        
         # Add gap distance field for pipe-separated text
         row += 1
         col = 0
@@ -703,20 +622,19 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.textPositioning_selector.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.textPositioning_selector, _("Select text positioning method"))
         self.addWidget(self.textPositioning_selector)
-        
+
         # Bind the callback to show/hide lid selector
         self.textPositioning_selector.bind('<<ComboboxSelected>>', self.on_text_positioning_change)
-        
+
         # ---- Lid Selector
         lid_list_str = Utils.getStr("SurfAlign", "lidList")
         self.lid_list = [lid.strip() for lid in lid_list_str.split(",") if lid.strip()] if lid_list_str and lid_list_str.strip() else []
-        
+
         row += 1
         col = 0
         self.lid_label = Label(lframe(), text=_("Lid Name:"))
         self.lid_label.grid(row=row, column=col, sticky=E)
         col += 1
-        self.lidName = StringVar()
         self.lidName_selector = ttk.Combobox(lframe(), textvariable=self.lidName, values=self.lid_list, width=30, state="readonly")
         self.lidName_selector.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.lidName_selector, _("Select lid name"))
@@ -729,7 +647,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.edit_lid_button.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.edit_lid_button, _("Edit lid names list"))
         self.addWidget(self.edit_lid_button)
-        
+
         row += 1
         col = 0
         self.center_offset_label = Label(lframe(), text=_("Offset (mm):"))
@@ -741,7 +659,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.center_offset_x.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.center_offset_x, _("Text Position Offset from Lid Center X"))
         self.addWidget(self.center_offset_x)
-        
+
         col += 1
         self.center_offset_y = tkExtra.FloatEntry(
             lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND
@@ -749,38 +667,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.center_offset_y.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.center_offset_y, _("Text Position Offset from Lid Center Y"))
         self.addWidget(self.center_offset_y)
-        
-        row += 1
-        col = 0
-        Label(lframe(), text=_("Y Adj Factor:")).grid(row=row, column=col, sticky=E)
-        col += 1
-        self.yAdjustFactor = Scale(
-            lframe(), 
-            from_=0, 
-            to=1, 
-            resolution=0.01,
-            orient=HORIZONTAL,
-            background=tkExtra.GLOBAL_CONTROL_BACKGROUND
-        )
-        self.yAdjustFactor.grid(row=row, column=col, sticky=EW)
 
-        # Descriptive label beside slider
-        col += 1
-        Label(
-            lframe(),
-            text="BBOX  <--->  COM",
-            font=("TkDefaultFont", 8, "italic"),
-        ).grid(row=row, column=col, sticky=W, padx=(4, 0))
-
-        tkExtra.Balloon.set(
-            self.yAdjustFactor,
-            _("Controls how much the Y origin is influenced by the center of mass.\n"
-              "0.0 → use bounding box center only\n"
-              "1.0 → use full center of mass\n"
-              "Values in between blend smoothly between both.")
-        )
-        self.addWidget(self.yAdjustFactor)
-        
         # Initially hide the lid selector (will be shown when "Lid Center" is selected)
         self.lid_label.grid_remove()
         self.lidName_selector.grid_remove()
@@ -788,7 +675,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.center_offset_label.grid_remove()
         self.center_offset_x.grid_remove()
         self.center_offset_y.grid_remove()
-        
+
         # ----
         # Pos (X, Y)
         row, col = row + 1, 0
@@ -810,12 +697,18 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         self.posY.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(self.posY, _("Engrave Text Center Position Y"))
         self.addWidget(self.posY)
-        
+
         self.pos_label.grid_remove()
         self.posX.grid_remove()
         self.posY.grid_remove()
-        
-        # ----  
+
+        # ----
+        # Nudge arrows: move the text in X/Y by a step, then refresh the preview
+        row += 1
+        Label(frame, text=_("Nudge Text:")).grid(row=row, column=0, sticky=NE, pady=(4, 0))
+        self._build_nudge(frame).grid(row=row, column=1, columnspan=2, sticky=W, pady=(4, 0))
+
+        # ----
         # Rotation
         row += 1
         col = 0
@@ -828,8 +721,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.rotation, _("Engrave Text Rotation along Z axis (degrees)"))
         self.addWidget(self.rotation)
-        
-        # ----  
+
+        # ----
         # Feedrate
         row += 1
         col = 0
@@ -842,19 +735,19 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.feedrate, _("Feedrate (mm/min)"))
         self.addWidget(self.feedrate)
-        
+
         # ----
         # Spindle RPM
         row += 1
         col = 0
-        Label(frame, text=_("Spindle RPM:")).grid(row=row, column=col, sticky=E)    
+        Label(frame, text=_("Spindle RPM:")).grid(row=row, column=col, sticky=E)
         col += 1
         self.spindleRPM = tkExtra.FloatEntry(
             frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
         )
         self.spindleRPM.grid(row=row, column=col, sticky=EW)
         tkExtra.Balloon.set(
-            self.spindleRPM, _("Spindle RPM"))  
+            self.spindleRPM, _("Spindle RPM"))
         self.addWidget(self.spindleRPM)
 
         # ----
@@ -870,7 +763,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.engraveDepth, _("Engrave Depth (mm)"))
         self.addWidget(self.engraveDepth)
-        
+
         # ----
         # Layer Height
         row += 1
@@ -884,8 +777,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.layerHeight, _("Layer Height"))
         self.addWidget(self.layerHeight)
-        
-        
+
+
         # ----
         # Safe Height
         row += 1
@@ -899,8 +792,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.safeHeight, _("Safe Height"))
         self.addWidget(self.safeHeight)
-        
-        # ----  
+
+        # ----
         # Final Height
         row += 1
         col = 0
@@ -913,7 +806,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         tkExtra.Balloon.set(
             self.finalHeight, _("Height to move to after engraving is complete"))
         self.addWidget(self.finalHeight)
-        
+
         col += 1
         generate_b = Button(frame, text=_("Generate"), command=self.generateGcode, padx=2, pady=1)
         generate_b.grid(row=row, column=col, sticky=EW)
@@ -924,12 +817,197 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         frame.grid_columnconfigure(1, weight=1)
         self.loadConfig()
+
+    # ===================== Preview controls (always visible) ======================
+    def _build_common(self, parent):
+        """Engraving text, lid, font size and vertical centering: what an engraver
+        checks against the preview before pressing Align & Run."""
+        parent.grid_columnconfigure(1, weight=1)
+        row = 0
+
+        Label(parent, text=_("Engraving:")).grid(row=row, column=0, sticky=E, pady=2)
+        self.engraveText = StringVar()
+        entry = Entry(parent, background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+                      font=("", 12), width=5, textvariable=self.engraveText)
+        entry.grid(row=row, column=1, sticky=EW, pady=2)
+        entry.bind('<Return>', lambda event: self.schedule_preview(0))
+        entry.bind('<FocusOut>', lambda event: self.schedule_preview())
+        tkExtra.Balloon.set(
+            entry,
+            _("Text to engrave. Use | to separate words with spacing. Use <|> for literal pipe character."),
+        )
+        self.addWidget(entry)
+
+        info_button = Button(parent, text="ℹ", font=("TkDefaultFont", 8, "bold"),
+                             command=self.show_text_syntax_help, width=2, height=1)
+        info_button.grid(row=row, column=2, sticky=W, padx=(2, 0))
+        tkExtra.Balloon.set(info_button, _("Click for detailed text syntax help"))
+
+        row += 1
+        Label(parent, text=_("Lid:")).grid(row=row, column=0, sticky=E, pady=2)
+        # The lid picker itself is in Advanced Settings; the list picks the lid.
+        self.lidName = StringVar()
+        self.lid_display = StringVar()
+        self.lidName.trace_add("write", lambda *a: self._update_lid_display())
+        Label(parent, textvariable=self.lid_display, anchor=W, font=("", 10, "bold")).grid(
+            row=row, column=1, columnspan=2, sticky=EW, pady=2)
+
+        row += 1
+        Label(parent, text=_("Font Size:")).grid(row=row, column=0, sticky=E, pady=2)
+        size_f = Frame(parent)
+        size_f.grid(row=row, column=1, columnspan=2, sticky=W, pady=2)
+        b = Button(size_f, text="−", width=3, font=("", 11, "bold"),
+                   command=lambda: self._step_font_size(-FONT_SIZE_STEP))
+        b.pack(side=LEFT)
+        self.addWidget(b)
+        self.fontSize = tkExtra.FloatEntry(
+            size_f, background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+            font=("", 12), width=6, justify=CENTER)
+        self.fontSize.pack(side=LEFT, padx=4, fill=Y)
+        self.fontSize.bind('<Return>', lambda event: self.schedule_preview(0))
+        self.fontSize.bind('<FocusOut>', lambda event: self.schedule_preview())
+        tkExtra.Balloon.set(self.fontSize, _("Engrave Text Size"))
+        self.addWidget(self.fontSize)
+        b = Button(size_f, text="+", width=3, font=("", 11, "bold"),
+                   command=lambda: self._step_font_size(FONT_SIZE_STEP))
+        b.pack(side=LEFT)
+        self.addWidget(b)
+
+        row += 1
+        Label(parent, text=_("Vertical\nCentering:"), justify=RIGHT).grid(row=row, column=0, sticky=E)
+        slider_f = Frame(parent)
+        slider_f.grid(row=row, column=1, columnspan=2, sticky=EW)
+        Label(slider_f, text=_("box"), font=("TkDefaultFont", 8, "italic"),
+              fg="gray").pack(side=LEFT, anchor=S, pady=(0, 4))
+        Label(slider_f, text=_("mass"), font=("TkDefaultFont", 8, "italic"),
+              fg="gray").pack(side=RIGHT, anchor=S, pady=(0, 4))
+        self.yAdjustFactor = Scale(
+            slider_f,
+            from_=0,
+            to=1,
+            resolution=0.01,
+            orient=HORIZONTAL,
+            background=tkExtra.GLOBAL_CONTROL_BACKGROUND,
+            command=lambda value: self.schedule_preview(),
+        )
+        self.yAdjustFactor.pack(side=LEFT, fill=X, expand=YES, padx=2)
+        tkExtra.Balloon.set(
+            self.yAdjustFactor,
+            _("Controls how much the Y origin is influenced by the center of mass.\n"
+              "0.0 → use bounding box center only (box)\n"
+              "1.0 → use full center of mass (mass)\n"
+              "Values in between blend smoothly between both.")
+        )
+        self.addWidget(self.yAdjustFactor)
+
+    def _update_lid_display(self):
+        if getattr(self, "textPositioning_var", None) is not None \
+                and self.textPositioning_var.get() == "Direct":
+            self.lid_display.set(_("(Direct position)"))
+        else:
+            self.lid_display.set(self.lidName.get() or _("No lid selected"))
+
+    def _step_font_size(self, delta):
+        try:
+            size = float(self.fontSize.get())
+        except ValueError:
+            return
+        self.fontSize.set("%g" % max(FONT_SIZE_STEP, round(size + delta, 2)))
+        self.schedule_preview()
+
+    def _build_nudge(self, parent):
+        """Arrow pad that moves the text by the chosen step and refreshes the preview."""
+        pad = Frame(parent)
+        arrows = Frame(pad)
+        arrows.pack(side=LEFT)
+        for text, r, c, dx, dy, tip in (
+                ("▲", 0, 1, 0, 1, _("Move text up (+Y)")),
+                ("◀", 1, 0, -1, 0, _("Move text left (-X)")),
+                ("▶", 1, 2, 1, 0, _("Move text right (+X)")),
+                ("▼", 2, 1, 0, -1, _("Move text down (-Y)"))):
+            b = Button(arrows, text=text, width=3, command=lambda dx=dx, dy=dy: self.nudge(dx, dy))
+            b.grid(row=r, column=c, sticky=NSEW, padx=1, pady=1)
+            tkExtra.Balloon.set(b, tip)
+            self.addWidget(b)
+        self.nudge_center_btn = Button(arrows, text="◎", width=3, command=self.nudge_reset)
+        self.nudge_center_btn.grid(row=1, column=1, sticky=NSEW, padx=1, pady=1)
+        tkExtra.Balloon.set(self.nudge_center_btn, _("Reset the offset to the lid center"))
+        self.addWidget(self.nudge_center_btn)
+
+        step_f = Frame(pad)
+        step_f.pack(side=LEFT, padx=(10, 0))
+        Label(step_f, text=_("Step (mm):")).pack(anchor=W)
+        self.nudge_step = StringVar(value=NUDGE_STEPS[0])
+        for value in NUDGE_STEPS:
+            Radiobutton(step_f, text=value, value=value, variable=self.nudge_step).pack(anchor=W)
+        return pad
+
+    def _nudge_fields(self):
+        """The X/Y entries a nudge moves for the current positioning mode."""
+        if self.textPositioning_var.get() == "Direct":
+            return self.posX, self.posY
+        return self.center_offset_x, self.center_offset_y
+
+    def nudge(self, dx, dy):
+        try:
+            step = float(self.nudge_step.get())
+        except ValueError:
+            return
+        for field, d in zip(self._nudge_fields(), (dx, dy)):
+            if not d:
+                continue
+            try:
+                value = float(field.get() or 0)
+            except ValueError:
+                value = 0.0
+            field.set("%g" % round(value + d * step, 3))
+        self.schedule_preview()
+
+    def nudge_reset(self):
+        if self.textPositioning_var.get() == "Direct":
+            return
+        self.center_offset_x.set("0")
+        self.center_offset_y.set("0")
+        self.schedule_preview()
+
+    # ============================== Preview refresh ===============================
+    def _preview_key(self):
+        """The adjustable inputs a preview was generated from."""
+        fields = (self.engraveText, self.fontSize, self.yAdjustFactor, self.textPositioning_var,
+                  self.center_offset_x, self.center_offset_y, self.posX, self.posY)
+        return tuple(str(f.get()) for f in fields)
+
+    def schedule_preview(self, delay=PREVIEW_DELAY_MS):
+        """Regenerate the preview once the operator stops adjusting.
+
+        Generating runs Blender, so a slider drag or a run of nudges is collapsed
+        into one regeneration after the last change.
+        """
+        if self._preview_id is not None:
+            self.after_cancel(self._preview_id)
+        self._preview_id = self.after(delay, self._refresh_preview)
+
+    def _refresh_preview(self):
+        self._preview_id = None
+        engraving = getattr(self.app, "engraving", None)
+        # Only an engraving preview already on screen is refreshed: before the
+        # first Engrave/Generate there is nothing to update, and a file loaded by
+        # hand is not ours to replace.
+        if engraving is None or engraving._generated is None:
+            return
+        if self._preview_key() == self._generated_key:
+            return
+        page = getattr(self.app, "lid_engravings", None)
+        if page is not None and page.busy():
+            # Loading G-code now would replace the program being probed or run.
+            self._scan_status(_("Machine busy - the change applies to the next Align & Run."))
+            return
+        self.generateGcode()
         
     def loadConfig(self):
         # Load all lids' defaults first
         self._lid_defaults = self._load_lid_defaults()
 
-        self.orderNumber.set(Utils.getStr("SurfAlign", "orderNumber"))
         self.engraveText.set(Utils.getStr("SurfAlign", "engraveText"))
         self.font_var.set(Utils.getStr("SurfAlign", "textFont"))
         self.fontSize.set(Utils.getFloat("SurfAlign", "fontSize"))
@@ -1006,8 +1084,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         except Exception:
             pass
 
-    def fetchShipHeroOrder(self, event=None):
-        order_number = self.orderNumber.get().strip()
+    def fetchShipHeroOrder(self, scanned=""):
+        """Look up a scanned order/tote in ShipHero and list its lids."""
+        order_number = str(scanned or "").strip()
         if not order_number:
             self._scan_status(_("Scan or type a number first."), error=True)
             self._focus_scan_field()
@@ -1108,8 +1187,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
         try:
             # Show a simple progress message or wait cursor
-            if hasattr(self, "fetchOrderBtn"):
-                self.fetchOrderBtn.config(state=DISABLED)
             self.app.setStatus(_("Fetching from ShipHero..."), True)
             self.app.config(cursor="watch")
             self.app.update()
@@ -1193,8 +1270,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             final_status = (_("ShipHero connection error: ") + str(e), True)
         finally:
             self.app.config(cursor="")
-            if hasattr(self, "fetchOrderBtn"):
-                self.fetchOrderBtn.config(state=NORMAL)
             if final_status is None:
                 self.app.setStatus("")
             else:
@@ -1277,8 +1352,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             Utils.setStr("SurfAlign", "thumbnailsDir", thumbnails_var.get().strip())
             new_mode = search_mode_var.get()
             Utils.setStr("SurfAlign", "shipheroSearchMode", new_mode)
-            if hasattr(self, 'searchModeLabel'):
-                self.searchModeLabel.config(text=_("Order Number:") if new_mode == "Order" else _("Tote ID:"))
             engraving = getattr(self.app, "engraving", None)
             if engraving is not None:
                 engraving.scan_label.config(text=engraving._scan_label_text())
@@ -1303,6 +1376,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     def generateGcode(self):
 
         print("Generate Gcode")
+        if self._preview_id is not None:
+            # Generating now covers any refresh still waiting to run
+            self.after_cancel(self._preview_id)
+            self._preview_id = None
+        preview_key = self._preview_key()
         engrave_text = self.engraveText.get()
         work_area_width, work_area_height = 500, 500
         font_path = None
@@ -1366,6 +1444,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
             self.app.load(gcode_file_path)
             print("Loaded Gcode file:", self.app.gcode.filename)
+            self._generated_key = preview_key
             engraving = getattr(self.app, "engraving", None)
             if engraving is not None:
                 # The text as it stood when the G-code was made is what gets cut,
@@ -1386,7 +1465,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
     # # -----------------------------------------------------------------------
     def saveConfig(self):
-        Utils.setStr("SurfAlign", "orderNumber", self.orderNumber.get())
         Utils.setStr("SurfAlign", "engraveText", self.engraveText.get())
         Utils.setStr("SurfAlign", "textFont", self.font_var.get())
         Utils.setFloat("SurfAlign", "fontSize", self.fontSize.get())
@@ -1421,6 +1499,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         elif lid_positioning_mode == "Direct":
             [widget.grid_remove() for widget in lid_center_widgets]
             [widget.grid() for widget in pos_widgets]
+        self.nudge_center_btn.config(state=DISABLED if lid_positioning_mode == "Direct" else NORMAL)
+        self._update_lid_display()
 
     def show_edit_lid_dialog(self):
         """Compact popup to manage lids and per-lid defaults (Font Size, Depth, Layer Height)."""
@@ -2169,11 +2249,14 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
 
 class MultiPointProbe(CNCRibbon.PageFrame):
-    def __init__(self, master, app):
+    def __init__(self, master, app, run_bar=None):
         CNCRibbon.PageFrame.__init__(self, master, "MultiPointProbe", app)
 
         self.probe_points = []
         self.stop_quick_align = False
+        # True from Align & Run until the program is sent (or the sequence ends):
+        # G-code must not be regenerated while it is being probed and aligned.
+        self.quick_align_active = False
 
         # Track scheduled callbacks so we can cancel them on stop
         self._poll_id = None
@@ -2344,19 +2427,23 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.z_safety_limit = tkExtra.FloatEntry(frame, background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
         self.z_safety_limit.grid(row=row, column=col, sticky=EW)
 
-        row += 1;
-        col = 0
+        # The whole-process buttons sit in `run_bar`, always on show
+        if run_bar is None:
+            run_bar = Frame(frame)
+            run_bar.grid(row=row + 1, column=0, columnspan=3, sticky=EW)
+        big = ("", 15, "bold")
         quick_align_run_b = Button(
-            frame,
-            text=_("Quick Align & Run"),
+            run_bar,
+            text=_("▶  Align & Run"),
             command=self.quick_align_run,
+            font=big, pady=10,
             bg="#4CAF50", fg="white",
             activebackground="#45a049", activeforeground="white"
         )
-        quick_align_run_b.grid(row=row, column=col, sticky=W)
+        quick_align_run_b.pack(side=LEFT, fill=X, expand=YES, padx=(0, 3))
         tkExtra.Balloon.set(
             quick_align_run_b,
-            _("Quick Align & Run\n\n"
+            _("Align & Run\n\n"
               "Performs a complete surface alignment process:\n"
               "1. Generate G-code\n"
               "2. Generate probe points\n"
@@ -2369,15 +2456,15 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         self.addWidget(quick_align_run_b)   # << auto-disable/enable during runs
 
         # Stop Running (with tooltip, NOT auto-managed — stays clickable)
-        col += 1
         stop_run_b = Button(
-            frame,
-            text=_("Stop Running"),
+            run_bar,
+            text=_("■  Stop"),
             command=self.quick_align_stop,
+            font=big, pady=10,
             bg="#F44336", fg="white",
             activebackground="#d32f2f", activeforeground="white"
         )
-        stop_run_b.grid(row=row, column=col, sticky=W)
+        stop_run_b.pack(side=LEFT, fill=X, expand=YES, padx=(3, 0))
         tkExtra.Balloon.set(
             stop_run_b,
             _("Immediately pauses/halts the current operation, retracts the probe, "
@@ -2468,7 +2555,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
+        is_valid, message, _unused = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
@@ -2496,7 +2583,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         try:
             num_points = int(self.n_probe_points.get())
             degree = int(self.polynomial_degree.get())
-            is_valid, message, _ = self.validate_probe_points_vs_degree(num_points, degree)
+            is_valid, message, _unused = self.validate_probe_points_vs_degree(num_points, degree)
             if "❌" in message:
                 self.validation_status.config(text=message.split('\n')[0], fg="red")
             elif "⚠️" in message:
@@ -3507,7 +3594,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
     def generate_probe(self, show_plot=True):
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
+        is_valid, message, _unused = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
@@ -3589,23 +3676,30 @@ class MultiPointProbe(CNCRibbon.PageFrame):
     def quick_align_run(self):
 
         gen = getattr(self.app, "surfalign_gen_gcode_frame", None)
-        if gen is not None:
-            try:
-                gen.generateGcode()
-            except Exception as e:
-                print("GenerateGcode failed:", e)
-        else:
+        if gen is None:
             print("GenGcodeFrame not found; skipping G-code generation")
+            return
+        try:
+            generated = gen.generateGcode()
+        except Exception as e:
+            print("GenerateGcode failed:", e)
+            generated = False
+        if not generated:
+            # Probing and running now would cut whatever G-code was loaded before.
+            self.app.setStatus(_("Align & Run cancelled - G-code generation failed."))
             return
 
         # Start fresh: clear any previous stop & cancel previous timers
         self._cancel_after_callbacks()
         self.stop_quick_align = False
+        self.quick_align_active = True
 
         no_of_points = int(self.n_probe_points.get())
         polynomial_degree = int(self.polynomial_degree.get())
-        is_valid, message, _ = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
+        # Not `_`: that would make the translation function local to this method
+        is_valid, message, _unused = self.validate_probe_points_vs_degree(no_of_points, polynomial_degree)
         if not is_valid:
+            self.quick_align_active = False
             messagebox.showerror(_("Probe Configuration Error"), message)
             return False
 
@@ -3613,6 +3707,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         success = self.generate_probe(show_plot=False)
         print("PROBE POINTS GENERATED", success)
         if not success or self.check_quick_align_stop():
+            self.quick_align_active = False
             return
 
         # Step 2: start probing
@@ -3624,6 +3719,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         success = self.start_probing()
         print("PROBING STARTED", success)
         if not success or self.check_quick_align_stop():
+            self.quick_align_active = False
             return
 
         # Step 3: poll probing status
@@ -3663,14 +3759,17 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         print("SURF ALIGN GCODE COMPLETED")
 
         if bounds is None:
+            self.quick_align_active = False
             messagebox.showwarning(_("Probing Error 0"), _("No probe points found 0"))
             return
         z_min = bounds.get("z_min")
         if z_min is None:
+            self.quick_align_active = False
             messagebox.showwarning(_("Probing Error 1"), _("No probe points found 1"))
             return
 
         if z_min < float(self.z_safety_limit.get()):
+            self.quick_align_active = False
             self.app.event_generate("<<Undo>>")
             messagebox.showwarning(_("Safety Limit Error"),
                                    _("Z-min is below the safety limit. Please adjust the Z-min safety limit."))
@@ -3682,6 +3781,8 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         if self.check_quick_align_stop():
             print("STOPPED QUICK ALIGN prevented RUN")
             return
+        # From here the run itself keeps the machine busy (app.running)
+        self.quick_align_active = False
         try:
             self.app.run()
             print("GCODE RUN COMMAND SENT")
@@ -3706,6 +3807,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         """
         # 1) Latch stop and mark probing not running
         self.stop_quick_align = True
+        self.quick_align_active = False
         try:
             self.app.gcode.probe.start_multi_point_scan = False
         except Exception:
@@ -3802,6 +3904,7 @@ class MultiPointProbe(CNCRibbon.PageFrame):
         Also force probing loop to end.
         """
         if self.stop_quick_align:
+            self.quick_align_active = False
             try:
                 self.app.gcode.probe.start_multi_point_scan = False
             except Exception:
@@ -3812,21 +3915,164 @@ class MultiPointProbe(CNCRibbon.PageFrame):
 
 
 # =============================================================================
+# Lid Engravings page layout
+# =============================================================================
+class _Section(Frame):
+    """A titled block that folds away behind a full-width header button."""
+
+    def __init__(self, master, title, expanded):
+        Frame.__init__(self, master)
+        self.title = title
+        self.header = Button(self, anchor=W, relief="flat", font=("", 11, "bold"),
+                             bg="#dde6ee", activebackground="#c9d6e2", padx=6, pady=3,
+                             command=self.toggle)
+        self.header.pack(side=TOP, fill=X)
+        self.body = Frame(self)
+        self.expanded = None
+        self.set_expanded(expanded)
+
+    def set_expanded(self, expanded):
+        if expanded == self.expanded:
+            return
+        self.expanded = expanded
+        self.header.config(text=("▼  " if expanded else "▶  ") + self.title)
+        if expanded:
+            self.body.pack(side=TOP, fill=X, padx=(4, 0), pady=(0, 2))
+        else:
+            self.body.pack_forget()
+
+    def toggle(self):
+        self.set_expanded(not self.expanded)
+
+
+class LidEngravingsFrame(CNCRibbon.PageFrame):
+    """The whole Lid Engravings page, in one vertically scrolling column:
+
+        Tote Scanning      (open)   - engraver login, scan, the tote's lids
+        Advanced Settings  (closed) - probe, G-code and surface-probe settings
+        preview controls            - text, lid, font size, vertical centering
+        Align & Run / Stop
+
+    SurfAlignPage.register builds the frames that fill it.
+    """
+
+    def __init__(self, master, app):
+        CNCRibbon.PageFrame.__init__(self, master, "LidEngravings", app)
+        self.app.lid_engravings = self
+        self.multipoint = None      # MultiPointProbe, set once it is built
+
+        # width/height=1: the pane's size decides, not the canvas' default request
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, width=1, height=1)
+        self.scrollbar = Scrollbar(self, orient=VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self._on_yscroll)
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=YES)
+        body = self.body = Frame(self.canvas)
+        self._window = self.canvas.create_window(0, 0, window=body, anchor=NW)
+        body.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+
+        self.scanning = _Section(body, _("Tote Scanning"), expanded=True)
+        self.scanning.pack(side=TOP, fill=X, pady=(2, 0))
+        self.advanced = _Section(body, _("Advanced Settings"), expanded=False)
+        self.advanced.pack(side=TOP, fill=X, pady=(2, 0))
+        self.setup_bar = Frame(self.advanced.body)
+        self.setup_bar.pack(side=TOP, fill=X, pady=(2, 4))
+
+        self.common = LabelFrame(body, text=_("Check the Preview"), foreground="DarkBlue",
+                                 padx=6, pady=4)
+        self.common.pack(side=TOP, fill=X, pady=(4, 0))
+        self.run_bar = Frame(body)
+        self.run_bar.pack(side=TOP, fill=X, pady=(6, 4))
+
+    def add_setup_buttons(self, engraving, gen):
+        for text, command in ((_("Engraving Station…"), engraving.show_settings_dialog),
+                              (_("ShipHero & Assets…"), gen.show_shiphero_and_asset_config_dialog)):
+            Button(self.setup_bar, text=text, command=command).pack(
+                side=LEFT, fill=X, expand=YES, padx=2)
+
+    # ------------------------------------------------------------------ state
+    def busy(self):
+        """Machine running, or Align & Run still probing/aligning before its run."""
+        return bool(self.app.running or (self.multipoint is not None
+                                          and self.multipoint.quick_align_active))
+
+    # --------------------------------------------------------------- showing
+    def show_scanning(self):
+        """Bring the page forward with Tote Scanning open and in view."""
+        self.app.ribbon.changePage("SurfAlign")
+        self.scanning.set_expanded(True)
+        self.see(self.scanning)
+
+    def show_run(self):
+        self.see(self.run_bar)
+
+    def see(self, widget):
+        """Scroll the least needed to bring `widget` fully into view."""
+        self.update_idletasks()
+        body_h = self.body.winfo_height()
+        view_h = self.canvas.winfo_height()
+        if body_h <= view_h or body_h <= 1:
+            return
+        top = widget.winfo_rooty() - self.body.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        first, last = self.canvas.yview()
+        if top < first * body_h or widget.winfo_height() > view_h:
+            self.canvas.yview_moveto(top / body_h)
+        elif bottom > last * body_h:
+            self.canvas.yview_moveto((bottom - view_h) / body_h)
+
+    # ------------------------------------------------------------- scrolling
+    def _on_yscroll(self, first, last):
+        self.scrollbar.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.scrollbar.pack_forget()
+        elif not self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack(side=RIGHT, fill=Y, before=self.canvas)
+
+    def _on_wheel(self, event):
+        # bind_all sees every wheel event in the app: act only on this page's
+        # own widgets, and leave the lid list to scroll itself.
+        path = str(event.widget)
+        canvas = str(self.canvas)
+        if not (path == canvas or path.startswith(canvas + ".")):
+            return
+        if isinstance(event.widget, ttk.Treeview):
+            return
+        first, last = self.canvas.yview()
+        if first <= 0.0 and last >= 1.0:
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+
+# =============================================================================
 # Probe Page
 # =============================================================================
 class SurfAlignPage(CNCRibbon.Page):
-    __doc__ = _("SurfAlign configuration and probing")
+    __doc__ = _("Scan totes, check the preview, align and engrave lids")
     _name_ = "SurfAlign"
+    _label_ = "Lid Engravings"
     _icon_ = "measure"
 
     # -----------------------------------------------------------------------
     # Add a widget in the widgets list to enable disable during the run
     # -----------------------------------------------------------------------
     def register(self):
-        self._register(
-            (ProbeTabGroup,),
-            (ProbeCommonFrame, GenGcodeFrame, MultiPointProbe),
-        )
+        from EngravingPage import EngravingFrame
+
+        self._register((ProbeTabGroup,), None)
+
+        # One scrolling page; the frames are built straight into its sections.
+        page = LidEngravingsFrame(self.master._pageFrame, self.app)
+        CNCRibbon.Page.frames[page.name] = page
+        advanced = page.advanced.body
+        engraving = EngravingFrame(page.scanning.body, self.app)
+        gen = GenGcodeFrame(advanced, self.app, common=page.common)
+        page.multipoint = MultiPointProbe(advanced, self.app, run_bar=page.run_bar)
+        for frame in (engraving, ProbeCommonFrame(advanced, self.app), gen, page.multipoint):
+            CNCRibbon.Page.frames[frame.name] = frame
+            frame.pack(side=TOP, fill=X)
+        page.add_setup_buttons(engraving, gen)
 
         self.tabGroup = CNCRibbon.Page.groups["Probe"]
         self.tabGroup.tab.set("Probe")

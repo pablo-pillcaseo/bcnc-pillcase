@@ -13,10 +13,12 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-# The logger's default roster and idle window, so an unconfigured machine behaves
-# like an unconfigured tablet.
+# The logger's default roster, so an unconfigured machine behaves like an
+# unconfigured tablet. The idle logout is a full day: an engraver stays logged in
+# across breaks and quiet spells, and is logged out only once the machine has sat
+# unused for 24 hours.
 DEFAULT_ENGRAVERS = "Halil Gurler,Manu Bekele,Maurice Williams"
-DEFAULT_IDLE_MINUTES = 15
+DEFAULT_IDLE_MINUTES = 24 * 60
 
 # This application cuts with a spindle. A separate laser application will report
 # "Laser" into the same log, so the method travels with every record.
