@@ -77,6 +77,7 @@ from EditorPage import EditorPage
 from FilePage import FilePage
 from ProbePage import ProbePage
 from SurfAlignPage import SurfAlignPage
+from EngravingPage import EngravingPage
 from Sender import NOT_CONNECTED, STATECOLOR, STATECOLORDEF, Sender
 from TerminalPage import TerminalPage
 from ToolsPage import Tools, ToolsPage
@@ -247,6 +248,7 @@ class Application(Tk, Sender):
             FilePage,
             ProbePage,
             SurfAlignPage,
+            EngravingPage,
             TerminalPage,
             ToolsPage,
         ):
@@ -302,7 +304,13 @@ class Application(Tk, Sender):
         self.autolevel = Page.frames["Probe:Autolevel"]
 
         # Left side
-        for name in Utils.getStr(Utils.__prg__, "ribbon").split():
+        ribbon = Utils.getStr(Utils.__prg__, "ribbon").split()
+        # A saved ~/.bCNC ribbon predates the Engraving tab; the scan loop needs
+        # it, so it goes in beside SurfAlign rather than silently missing.
+        if "Engraving" not in ribbon:
+            at = ribbon.index("SurfAlign") + 1 if "SurfAlign" in ribbon else len(ribbon)
+            ribbon.insert(at, "Engraving")
+        for name in ribbon:
             # print("Ribbon name: ", name)
             last = name[-1]
             if last == ">":
@@ -2387,6 +2395,8 @@ class Application(Tk, Sender):
 
         self.setStatus(_("Loading: {} ...").format(filename), True)
         Sender.load(self, filename)
+        if ext not in (".probe", ".orient"):
+            self._engravingHook("on_gcode_loaded")
 
         if ext == ".probe":
             self.autolevel.setValues()
@@ -2591,6 +2601,17 @@ class Application(Tk, Sender):
     # -----------------------------------------------------------------------
     # Send enabled gcode file to the CNC machine
     # -----------------------------------------------------------------------
+    def _engravingHook(self, name, *args):
+        """Tell the Engraving tab about a load or run. Never breaks the run."""
+        engraving = getattr(self, "engraving", None)
+        if engraving is None:
+            return
+        try:
+            getattr(engraving, name)(*args)
+        except Exception:
+            traceback.print_exc()
+
+    # -----------------------------------------------------------------------
     def run(self, lines=None):
         self.cleanAfter = True  # Clean when this operation stops
         print("Will clean after this operation")
@@ -2678,6 +2699,9 @@ class Application(Tk, Sender):
                     n += 1
             # set it at the end to be sure that all lines are queued
             self._runLines = n
+        # Every run that can finish passes here. Only the loaded program (no
+        # `lines`) is an engraving; probing and moves pass their own lines.
+        self._engravingHook("on_run_started", lines is None)
         self.queue.put((WAIT,))  # wait at the end to become idle
 
         self.setStatus(_("Running..."))
@@ -2879,7 +2903,12 @@ class Application(Tk, Sender):
                     self._selectI += 1
 
             if self._gcount >= self._runLines:
+                # Every line executed. A stop or an alarm never gets here (the
+                # queue is purged instead), and an error line leaves errline set.
+                completed = not CNC.vars.get("errline")
                 self.runEnded()
+                if completed:
+                    self._engravingHook("on_run_completed")
 
     # -----------------------------------------------------------------------
     # "thread" timed function looking for messages in the serial thread

@@ -438,6 +438,10 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
     def _focus_scan_field(self):
         """Return focus to the scan entry, selected, ready for the next scan."""
+        engraving = getattr(self.app, "engraving", None)
+        if engraving is not None and self.app.ribbon.getActivePage().name == "Engraving":
+            engraving.focus_scan()
+            return
         entry = GenGcodeFrame.orderNumber
         entry.focus_set()
         entry.select_range(0, END)
@@ -1009,6 +1013,14 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             self._focus_scan_field()
             return
 
+        # Engravings are credited to whoever is logged in, so nobody engraves a
+        # tote anonymously. The scan is kept and loads right after login.
+        engraving = getattr(self.app, "engraving", None)
+        if engraving is not None and not engraving.session.logged_in:
+            engraving.require_login(order_number)
+            return
+        scanned = order_number
+
         endpoint, token = self.get_shiphero_credentials()
         if not endpoint or not token:
             if not self.show_shiphero_and_asset_config_dialog():
@@ -1039,6 +1051,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 data(first: 1) {
                   edges {
                     node {
+                      order_number
                       line_items(first: 20) {
                         edges {
                           node {
@@ -1070,6 +1083,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                   edges {
                     node {
                       orders {
+                        order_number
                         line_items(first: 20) {
                           edges {
                             node {
@@ -1120,6 +1134,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 return
             response.raise_for_status()
 
+            # (order_number, line item edge) - a tote can hold several orders, and
+            # each lid has to say which one it belongs to.
             line_items = []
             if searchMode == "Order":
                 edges = data.get("data", {}).get("orders", {}).get("data", {}).get("edges", [])
@@ -1127,7 +1143,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                     final_status = (_("No order found with number: ") + order_number, True)
                     return
                 order_node = edges[0]["node"]
-                line_items = order_node.get("line_items", {}).get("edges", [])
+                line_items = [(order_node.get("order_number"), e)
+                              for e in order_node.get("line_items", {}).get("edges", [])]
             else:
                 edges = data.get("data", {}).get("totes", {}).get("data", {}).get("edges", [])
                 if not edges:
@@ -1137,11 +1154,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 orders_list = tote_node.get("orders") or []
                 for order_obj in orders_list:
                     items = order_obj.get("line_items", {}).get("edges", [])
-                    line_items.extend(items)
+                    line_items.extend((order_obj.get("order_number"), e) for e in items)
                 if not line_items:
                     final_status = (_("Tote found, but it contains no orders/items."), True)
                     return
-            
+
             if not hasattr(self, "_lid_defaults"):
                 self._lid_defaults = self._load_lid_defaults()
 
@@ -1151,9 +1168,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             # ambiguous one, and the colour comes from the SKU instead of being
             # guessed out of the marketing name.
             items_to_show = []
-            for item_edge in line_items:
+            for order_no, item_edge in line_items:
                 node = item_edge.get("node") or {}
-                items_to_show.extend(PillcaseOrder.resolve_line_item(node))
+                for row in PillcaseOrder.resolve_line_item(node):
+                    row["order_number"] = order_no or ""
+                    items_to_show.append(row)
 
             if not items_to_show:
                 final_status = (_("Found, but no line items available."), True)
@@ -1168,7 +1187,7 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 final_status = (_("Loaded {} lid(s) - ShipHero query cost: {} credits")
                                 .format(len(items_to_show), cost), False)
 
-            self.display_shiphero_order_popup(items_to_show)
+            self.app.engraving.load_order(scanned, searchMode, items_to_show)
 
         except Exception as e:
             final_status = (_("ShipHero connection error: ") + str(e), True)
@@ -1260,6 +1279,9 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             Utils.setStr("SurfAlign", "shipheroSearchMode", new_mode)
             if hasattr(self, 'searchModeLabel'):
                 self.searchModeLabel.config(text=_("Order Number:") if new_mode == "Order" else _("Tote ID:"))
+            engraving = getattr(self.app, "engraving", None)
+            if engraving is not None:
+                engraving.scan_label.config(text=engraving._scan_label_text())
             success[0] = True
             dialog.destroy()
 
@@ -1277,356 +1299,6 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         return success[0]
 
 
-
-    def display_shiphero_order_popup(self, items):
-        """Pick which lid is being engraved, from the rows PillcaseOrder resolved.
-
-        `items` is a list of row dicts (see PillcaseOrder.resolve_line_item), one
-        per physical lid. Each row is shown as its colour thumbnail plus the case
-        type and colour name, because that is what the operator matches against
-        the lid in their hand - the raw SKU is reference detail, not the label.
-        """
-        import os
-
-        popup = Toplevel(self)
-        popup.title(_("ShipHero Order Items"))
-        popup.transient(self)
-        self._center_window(popup, 800, 500)
-        popup.grab_set()
-
-        top_frame = Frame(popup)
-        top_frame.pack(fill=X, padx=10, pady=5)
-        
-        Label(top_frame, text=_("Enter imports the selected item, Esc closes:"),
-              font=("", 10, "bold")).pack(side=LEFT)
-
-        hide_non_engraving_var = BooleanVar(value=True)
-
-        # Inline, non-blocking warnings - shown in place of modal dialogs so a
-        # mis-selection never costs the operator an extra click.
-        popup_warning = StringVar()
-
-        def warn(msg):
-            popup_warning.set(msg)
-            popup.bell()
-
-        def close_popup(event=None):
-            popup.destroy()
-            self._focus_scan_field()
-
-        popup.protocol("WM_DELETE_WINDOW", close_popup)
-        popup.bind("<Escape>", close_popup)
-
-        main_pane = PanedWindow(popup, orient=HORIZONTAL)
-        main_pane.pack(expand=YES, fill=BOTH, padx=10, pady=(0, 10))
-        
-        left_frame = Frame(main_pane)
-        main_pane.add(left_frame, minsize=300)
-        
-        style = ttk.Style()
-        style.configure("OrderItems.Treeview", rowheight=24)
-        style.layout("OrderItems.Treeview.Item", [
-            ('Treeitem.padding', {'sticky': 'nswe', 'children': [
-                ('Treeitem.image', {'side': 'left', 'sticky': ''}),
-                ('Treeitem.text', {'sticky': 'nswe'})
-            ]})
-        ])
-        
-        tree_container = Frame(left_frame)
-        tree_container.pack(side=TOP, expand=YES, fill=BOTH)
-        
-        tree = ttk.Treeview(tree_container, style="OrderItems.Treeview",
-                            columns=("Engraving", "MappedLid"), show='tree headings',
-                            displaycolumns=("Engraving",))
-        tree.heading("#0", text=_("Case Type / Colour"))
-        tree.column("#0", width=330, minwidth=200)
-        tree.heading("Engraving", text=_("Engraving"))
-        tree.column("Engraving", width=110, minwidth=70, stretch=False)
-
-        tree.pack(side=LEFT, expand=YES, fill=BOTH)
-
-        scrollbar = Scrollbar(tree_container, orient=VERTICAL, command=tree.yview)
-        scrollbar.pack(side=RIGHT, fill=Y)
-        tree.configure(yscrollcommand=scrollbar.set)
-
-        tree.tag_configure('unmapped', background='#ffcccc')
-        tree.tag_configure('warned', background='#fff0cc')
-
-        Checkbutton(left_frame, text=_("Hide non-engraving items"), variable=hide_non_engraving_var, command=lambda: refresh_tree()).pack(side=BOTTOM, anchor=W, pady=2)
-
-        right_frame = LabelFrame(main_pane, text=_("Item Details"), padx=10, pady=10)
-        main_pane.add(right_frame, minsize=300)
-
-        detail_casetype = StringVar()
-        detail_color = StringVar()
-        detail_engraving = StringVar()
-        detail_lid = StringVar()
-        detail_source = StringVar()
-        detail_warnings = StringVar()
-
-        def make_detail_row(parent, label_text, str_var, row):
-            Label(parent, text=label_text, font=("", 9, "bold")).grid(row=row, column=0, sticky=NE, pady=5, padx=(0,5))
-            val_lbl = Label(parent, textvariable=str_var, justify=LEFT, wraplength=250, anchor=NW)
-            val_lbl.grid(row=row, column=1, sticky=NW, pady=5)
-            return val_lbl
-
-        # Case type and colour lead, because those are what the operator matches
-        # against the lid physically in front of them.
-        casetype_lbl = make_detail_row(right_frame, _("Case Type:"), detail_casetype, 0)
-        casetype_lbl.config(font=("", 10, "bold"))
-
-        Label(right_frame, text=_("Colour:"), font=("", 9, "bold")).grid(row=1, column=0, sticky=NE, pady=5, padx=(0,5))
-        color_frame = Frame(right_frame)
-        color_frame.grid(row=1, column=1, sticky=NW, pady=5)
-        color_swatch = tk.Canvas(color_frame, width=48, height=48, highlightthickness=1, highlightbackground="gray")
-        color_lbl = Label(color_frame, textvariable=detail_color, justify=LEFT, anchor=NW)
-        color_lbl.pack(side=LEFT)
-
-        make_detail_row(right_frame, _("Engraving:"), detail_engraving, 2)
-
-        Label(right_frame, text=_("Lid:"), font=("", 9, "bold")).grid(row=3, column=0, sticky=NE, pady=5, padx=(0,5))
-        lid_names = list(self.lid_list) if hasattr(self, 'lid_list') else []
-        override_combo = ttk.Combobox(right_frame, values=lid_names, state="readonly", textvariable=detail_lid, width=25)
-        override_combo.grid(row=3, column=1, sticky=NW, pady=5)
-
-        source_lbl = make_detail_row(right_frame, _("From:"), detail_source, 4)
-        source_lbl.config(fg="gray", font=("", 8))
-
-        warn_lbl = Label(right_frame, textvariable=detail_warnings, justify=LEFT,
-                         wraplength=250, anchor=NW, fg="red", font=("", 8))
-        warn_lbl.grid(row=5, column=0, columnspan=2, sticky=NW, pady=(8, 0))
-
-        right_frame.columnconfigure(1, weight=1)
-
-        def on_combo_change(event):
-            selected = tree.selection()
-            if selected:
-                item_id = selected[0]
-                new_lid = detail_lid.get()
-                vals = list(tree.item(item_id)['values'])
-                if len(vals) >= 2:
-                    vals[1] = new_lid
-                    tree.item(item_id, values=vals)
-                    if new_lid and new_lid != "Unmapped":
-                        tree.item(item_id, tags=())
-        override_combo.bind("<<ComboboxSelected>>", on_combo_change)
-
-        def get_color_icon(row, size=18):
-            """Thumbnail for a row's colour, by display name then by colour code."""
-            code = row.get("colour_code") or ""
-            name = row.get("colour_name") or ""
-            if not code and not name:
-                return None
-            if not hasattr(tree, 'icon_cache'):
-                tree.icon_cache = {}
-            cache_key = "%s|%s|%s" % (code.lower(), name.lower(), size)
-            if cache_key in tree.icon_cache:
-                return tree.icon_cache[cache_key]
-
-            img_path = PillcaseOrder.find_thumbnail(
-                PillcaseOrder.thumbnail_dirs(Utils.getStr("SurfAlign", "thumbnailsDir", "")),
-                code, name)
-            if not img_path:
-                # A colour whose image has not been shot yet. The row still shows -
-                # with its case type and colour name - just without a swatch.
-                tree.icon_cache[cache_key] = None
-                return None
-
-            try:
-                from PIL import Image, ImageTk
-            except Exception:
-                # Not cached: Pillow missing is a property of the install, not of
-                # this colour, and caching None here would outlive a later fix.
-                return None
-
-            try:
-                img = Image.open(img_path).resize((size, size), Image.LANCZOS)
-                icon = ImageTk.PhotoImage(img)
-            except Exception:
-                icon = None
-            tree.icon_cache[cache_key] = icon
-            return icon
-
-        def update_swatch(row):
-            color_swatch.delete("all")
-            icon = get_color_icon(row, size=48) if row else None
-            if icon:
-                color_swatch.pack(side=LEFT, padx=(10, 0))
-                color_swatch.image = icon
-                color_swatch.create_image(0, 0, anchor=NW, image=color_swatch.image)
-            else:
-                color_swatch.pack_forget()
-
-        def get_mapped_lid(row):
-            """The lid configured for this row's parsed product code, if any."""
-            if not hasattr(self, "_lid_defaults"):
-                self._lid_defaults = self._load_lid_defaults()
-            hits = PillcaseOrder.lids_for_product(self._lid_defaults, row.get("product_code"))
-            return hits[0] if hits else None
-
-        displayed_items = []
-
-        def row_label(row):
-            """Tree text: the case type and colour, which together name one lid.
-
-            The separator is an en dash because a case type can contain a hyphen
-            of its own ("Weekly AMPM Vitamin Case - AM Left Side"), and the split
-            between case and colour has to stay readable at a glance.
-            """
-            case = row.get("case_type") or row.get("product_code") or _("Unknown case")
-            colour = row.get("colour_name") or _("colour?")
-            return "%s  –  %s" % (case, colour)
-
-        def refresh_tree():
-            del displayed_items[:]
-            for item in tree.get_children():
-                tree.delete(item)
-            hide_non_engraving = hide_non_engraving_var.get()
-            for row in items:
-                eng_val = row.get("engraving") or ""
-                has_engraving = bool(str(eng_val).strip() and str(eng_val) != "None")
-                if hide_non_engraving and not has_engraving:
-                    continue
-
-                displayed_items.append(row)
-
-                mapped_lid = get_mapped_lid(row)
-                if not mapped_lid:
-                    tag = ('unmapped',)
-                elif row.get("warnings"):
-                    tag = ('warned',)
-                else:
-                    tag = ()
-                display_lid = mapped_lid if mapped_lid else "Unmapped"
-
-                icon = get_color_icon(row)
-                text = row_label(row)
-                if icon:
-                    tree.insert("", END, text="  " + text, image=icon,
-                                values=(eng_val, display_lid), tags=tag)
-                else:
-                    tree.insert("", END, text=text,
-                                values=(eng_val, display_lid), tags=tag)
-
-        refresh_tree()
-
-        def selected_row():
-            selected = tree.selection()
-            if not selected:
-                return None, None
-            item_id = selected[0]
-            try:
-                return item_id, displayed_items[tree.index(item_id)]
-            except Exception:
-                return item_id, None
-
-        def on_tree_select(event=None):
-            popup_warning.set("")
-            item_id, row = selected_row()
-            if row is None:
-                detail_casetype.set("")
-                detail_color.set("")
-                detail_engraving.set("")
-                detail_lid.set("")
-                detail_source.set("")
-                detail_warnings.set("")
-                casetype_lbl.config(fg="black")
-                color_lbl.config(fg="black", font=("", 9, "normal"))
-                update_swatch(None)
-                return
-
-            detail_casetype.set(row.get("case_type") or row.get("product_code") or _("Unknown case"))
-            casetype_lbl.config(fg="black" if row.get("case_type") else "red")
-
-            detail_color.set(row.get("colour_name") or _("Not resolved"))
-            color_lbl.config(fg="black" if row.get("colour_name") else "red",
-                             font=("", 9, "normal"))
-            update_swatch(row)
-
-            detail_engraving.set(row.get("engraving") or "")
-            detail_source.set("%s  |  %s  |  %s" % (
-                row.get("product_name") or "", row.get("sku") or _("no SKU"),
-                row.get("rule") or ""))
-            detail_warnings.set("\n".join(row.get("warnings") or []))
-
-            vals = tree.item(item_id)['values']
-            detail_lid.set(vals[1] if len(vals) > 1 else "")
-
-        tree.bind("<<TreeviewSelect>>", on_tree_select)
-
-        def import_selected(event=None):
-            item_id, row = selected_row()
-            if row is None:
-                warn(_("Select a product first."))
-                return "break"
-
-            eng_val = row.get("engraving") or ""
-            vals = tree.item(item_id)['values']
-            display_lid = vals[1] if len(vals) > 1 else ""
-
-            if not display_lid or display_lid == "Unmapped":
-                warn(_("This case type is not mapped to any Lid. Pick one from the dropdown."))
-                return "break"
-
-            if not eng_val or eng_val == "None":
-                warn(_("This item has no Lid Engraving text."))
-                return "break"
-
-            self.engraveText.set(str(eng_val))
-            self.lidName.set(display_lid)
-
-            if hasattr(self, '_apply_defaults_to_main_fields_if_available'):
-                self._apply_defaults_to_main_fields_if_available(display_lid)
-
-            # Close first so the grab is released before the (slow) GCode run,
-            # and so a generation error dialog is not stacked behind the popup.
-            popup.destroy()
-            self._scan_status(_("Imported '%s' on %s - generating GCode...") % (eng_val, display_lid))
-            try:
-                # generateGcode parses the parameter fields before its own try
-                # block, so a bad lid default would otherwise vanish into the Tk
-                # event loop with no feedback on the scan path.
-                ok = self.generateGcode()
-            except Exception as e:
-                self._scan_status(_("GCode generation failed: ") + str(e), error=True)
-            else:
-                if ok:
-                    self._scan_status(_("Ready - GCode generated for '%s' on %s") % (eng_val, display_lid))
-                else:
-                    # generateGcode already showed the reason in its own dialog
-                    self._scan_status(_("GCode generation failed - fields imported, not generated."), error=True)
-            self._focus_scan_field()
-            return "break"
-
-        tree.bind("<Double-1>", import_selected)
-        # Bound on the toplevel only - a duplicate binding on the tree would fire
-        # twice and the second pass would touch already-destroyed widgets.
-        popup.bind("<Return>", import_selected)
-
-        # Preselect the first row so a scan lands on a ready-to-import selection
-        rows = tree.get_children()
-        if rows:
-            tree.selection_set(rows[0])
-            tree.focus(rows[0])
-            tree.see(rows[0])
-        tree.focus_set()
-
-        Label(popup, textvariable=popup_warning, fg="red", anchor=W).pack(fill=X, padx=10)
-
-        btn_f = Frame(popup)
-        btn_f.pack(pady=10)
-
-        def open_settings():
-            # The settings dialog takes the grab and Tk does not hand it back
-            # when that dialog is destroyed, so reclaim it here.
-            self.show_shiphero_and_asset_config_dialog()
-            if popup.winfo_exists():
-                popup.grab_set()
-                tree.focus_set()
-
-        Button(btn_f, text=_("Import Selection"), command=import_selected, width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Settings..."), command=open_settings, width=15).pack(side=LEFT, padx=5)
-        Button(btn_f, text=_("Close"), command=close_popup, width=15).pack(side=LEFT, padx=5)
 
     def generateGcode(self):
 
@@ -1694,6 +1366,11 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
 
             self.app.load(gcode_file_path)
             print("Loaded Gcode file:", self.app.gcode.filename)
+            engraving = getattr(self.app, "engraving", None)
+            if engraving is not None:
+                # The text as it stood when the G-code was made is what gets cut,
+                # typed or scanned - so that is what a completed run records.
+                engraving.on_gcode_generated(engrave_text, self.lidName.get())
             return True
 
         except Exception as e:
