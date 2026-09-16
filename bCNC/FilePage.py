@@ -38,6 +38,7 @@ except Exception:
     from Utils import comports
 
 BAUDS = [2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400]
+AUTOSETUP_STATUS_CLEAR_MS = 10000
 
 # =============================================================================
 # Recent Menu button
@@ -291,6 +292,7 @@ class AutoSetupFrame(CNCRibbon.PageLabelFrame):
 
         self.status = Label(self, text="", anchor=W)
         self.status.pack(side=LEFT, fill=BOTH, expand=YES, padx=2)
+        self._clear_id = None
 
     # -----------------------------------------------------------------------
     def toggle(self):
@@ -302,11 +304,22 @@ class AutoSetupFrame(CNCRibbon.PageLabelFrame):
     # -----------------------------------------------------------------------
     def report(self, msg, color):
         running = color is None
+        if self._clear_id is not None:
+            self.after_cancel(self._clear_id)
+            self._clear_id = None
         self.status.config(text=msg,
                            background=color or self.cget("background"))
         self.button.config(text=_("Cancel") if running else _("Auto Setup"))
         if running:
             self.status.update_idletasks()
+        else:
+            # The outcome is only news for a moment; don't leave it standing.
+            self._clear_id = self.after(AUTOSETUP_STATUS_CLEAR_MS, self._clear)
+
+    # -----------------------------------------------------------------------
+    def _clear(self):
+        self._clear_id = None
+        self.status.config(text="", background=self.cget("background"))
 
 
 # =============================================================================

@@ -287,8 +287,9 @@ class AutoSetup:
         yield from self._wait_probe_boot()
 
     def _wait_probe_boot(self):
-        """Opening the port reboots the probe's ESP32, which ignores commands
-        until it has finished printing its boot log. Wait for that to stop."""
+        """Opening the port reboots the probe's ESP32. Its boot log is read and
+        discarded so each command's logged response is the firmware's reply,
+        not a leftover boot line."""
         self._status(_("Waiting for the probe to start..."))
         port = self.app.blt_serial
         start = last = time.time()
