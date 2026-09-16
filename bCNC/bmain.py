@@ -268,6 +268,10 @@ class Application(Tk, Sender):
                 # Its frames now live inside one scrolling page, which a saved
                 # ~/.bCNC listing them one by one would break.
                 names = ["LidEngravings*"]
+            elif page.name == "File" and "AutoSetup" not in names:
+                # A saved ~/.bCNC page list predates the Auto Setup panel.
+                names.insert(names.index("Serial") if "Serial" in names
+                             else len(names), "AutoSetup")
             for n in names:
                 last = n[-1]
                 if ((n == "abcDRO" or n == "abcControl")

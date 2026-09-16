@@ -20,6 +20,7 @@ from tkinter import (
     Label,
     Menu,
 )
+from AutoSetup import AutoSetup
 import CNCRibbon
 import Ribbon
 import tkExtra
@@ -264,6 +265,48 @@ class CloseGroup(CNCRibbon.ButtonGroup):
         )
         b.pack(fill=BOTH, expand=YES)
         tkExtra.Balloon.set(b, _("Close program [Ctrl-Q]"))
+
+
+# =============================================================================
+# Auto Setup Frame
+# =============================================================================
+class AutoSetupFrame(CNCRibbon.PageLabelFrame):
+    def __init__(self, master, app):
+        CNCRibbon.PageLabelFrame.__init__(
+            self, master, "AutoSetup", _("Auto Setup"), app)
+        self.setup = AutoSetup(app, self.report)
+
+        self.button = Ribbon.LabelButton(
+            self,
+            text=_("Auto Setup"),
+            command=self.toggle,
+            background=Ribbon._BACKGROUND,
+        )
+        self.button.pack(side=LEFT, padx=2, pady=2)
+        tkExtra.Balloon.set(
+            self.button,
+            _("Reconnect the CNC and probe on the right ports, cycle the "
+              "probe, home ($H), check the work origin and move to it"))
+        self.addWidget(self.button)
+
+        self.status = Label(self, text="", anchor=W)
+        self.status.pack(side=LEFT, fill=BOTH, expand=YES, padx=2)
+
+    # -----------------------------------------------------------------------
+    def toggle(self):
+        if self.setup.active:
+            self.setup.cancel()
+        else:
+            self.setup.start()
+
+    # -----------------------------------------------------------------------
+    def report(self, msg, color):
+        running = color is None
+        self.status.config(text=msg,
+                           background=color or self.cget("background"))
+        self.button.config(text=_("Cancel") if running else _("Auto Setup"))
+        if running:
+            self.status.update_idletasks()
 
 
 # =============================================================================
@@ -663,5 +706,5 @@ class FilePage(CNCRibbon.Page):
     # ----------------------------------------------------------------------
     def register(self):
         self._register(
-            (FileGroup, PendantGroup, OptionsGroup, CloseGroup), (SerialFrame, BLTouchSerialFrame)
+            (FileGroup, PendantGroup, OptionsGroup, CloseGroup), (AutoSetupFrame, SerialFrame, BLTouchSerialFrame)
         )
