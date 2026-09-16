@@ -28,6 +28,7 @@ EXPECTED_ORIGIN_Z = -76.6
 ORIGIN_TOLERANCE_Z = 10.0
 
 PROBE_CYCLES = 3
+HOMING_TIMEOUT_S = 180
 PROBE_SETTLE_MS = 800
 POLL_MS = 100
 
@@ -53,8 +54,8 @@ def _is_grbl(device, baud):
 
     Opening asserts DTR, which resets an Arduino-based controller into
     printing its "Grbl x.y" banner. Boards that do not reset are asked for a
-    status report instead. "?" is harmless to the probe's board: at the wrong
-    baud rate it cannot arrive as one of the probe's command digits.
+    status report instead. "?" is harmless to the probe's board, which only
+    acts on the digits 1-4.
     """
     try:
         port = serial.Serial(device, int(baud), timeout=0.1)
@@ -126,9 +127,9 @@ class AutoSetup:
         if not self.active:
             return
         self._finish()
-        # Homing and rapids ignore feed hold; only a reset stops them.
-        if (self.app.serial is not None
-                and CNC.vars["state"] in ("Home", "Run", "Jog")):
+        # Homing and rapids ignore feed hold; only a reset stops them. Homing
+        # still reads "Alarm" (no status reports), so reset unless Idle.
+        if self.app.serial is not None and CNC.vars["state"] != "Idle":
             self.app.mcontrol.softReset(False)
         self._retract()
         self.report(_("Auto Setup cancelled"), "Salmon")
@@ -283,7 +284,27 @@ class AutoSetup:
         self.app.openCloseBLTouch()
         if self.app.blt_serial is None:
             raise SetupError(_("Could not open the probe on {}.").format(probe_port))
-        yield 500
+        yield from self._wait_probe_boot()
+
+    def _wait_probe_boot(self):
+        """Opening the port reboots the probe's ESP32, which ignores commands
+        until it has finished printing its boot log. Wait for that to stop."""
+        self._status(_("Waiting for the probe to start..."))
+        port = self.app.blt_serial
+        start = last = time.time()
+        log = b""
+        while time.time() - start < 10:
+            try:
+                data = port.read(port.in_waiting or 0)
+            except Exception as e:
+                raise SetupError(_("Lost the probe connection: {}").format(e))
+            if data:
+                log += data
+                last = time.time()
+            elif time.time() - last > 1.0 and time.time() - start > 2.0:
+                break
+            yield POLL_MS
+        print(f"[AUTOSETUP] probe boot log: {log!r}")
 
     def _probe_send(self, cmd):
         try:
@@ -317,27 +338,26 @@ class AutoSetup:
                   ).format(triggered, PROBE_CYCLES))
 
     def _home(self):
+        """Home and wait for $H to be answered.
+
+        GRBL sends no status reports while homing, so the state stays at the
+        "Alarm" of the homing lock until it finishes. Completion is instead the
+        controller's reply to $H; a failure arrives as an ALARM:n or error:n line.
+        """
         self._status(_("Homing ($H)..."))
+        replies = self.app._gcount
         self.app.mcontrol.home()
-        seen = []
-
-        def started():
-            if CNC.vars["state"] == "Home":
-                seen.append(True)
-            return bool(seen)
-
-        yield from self._wait_for(
-            started, 5,
-            lambda: _("Homing did not start (controller state: {}).").format(
-                CNC.vars["state"]))
 
         def done():
             state = CNC.vars["state"]
-            if _is_alarm(state):
+            if state.startswith(("ALARM:", "error:")):
                 raise SetupError(_("Homing failed: {}").format(state))
-            return state == "Idle"
+            return self.app._gcount > replies and state == "Idle"
 
-        yield from self._wait_for(done, 120, _("Timed out waiting for homing."))
+        yield from self._wait_for(
+            done, Utils.getFloat("AutoSetup", "homingTimeout", HOMING_TIMEOUT_S),
+            lambda: _("Timed out waiting for homing (controller state: {})."
+                      ).format(CNC.vars["state"]))
 
     def _read_origin(self):
         """Machine position of the active work origin, cross-checked two ways.
