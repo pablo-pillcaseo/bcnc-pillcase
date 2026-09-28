@@ -3995,8 +3995,9 @@ class LidEngravingsFrame(CNCRibbon.PageFrame):
         body.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
         self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+        self._guard_value_wheel()
 
-        self.scanning = _Section(body, _("Tote Scanning"), expanded=True)
+        self.scanning =_Section(body, _("Tote Scanning"), expanded=True)
         self.scanning.pack(side=TOP, fill=X, pady=(2, 0))
         self.advanced = _Section(body, _("Advanced Settings"), expanded=False)
         self.advanced.pack(side=TOP, fill=X, pady=(2, 0))
@@ -4054,19 +4055,47 @@ class LidEngravingsFrame(CNCRibbon.PageFrame):
         elif not self.scrollbar.winfo_ismapped():
             self.scrollbar.pack(side=RIGHT, fill=Y, before=self.canvas)
 
-    def _on_wheel(self, event):
-        # bind_all sees every wheel event in the app: act only on this page's
-        # own widgets, and leave the lid list to scroll itself.
-        path = str(event.widget)
+    # Widget classes whose built-in wheel binding changes their value
+    _VALUE_WHEEL_CLASSES = ("TCombobox", "TSpinbox", "Spinbox", "Scale", "TScale")
+
+    def _guard_value_wheel(self):
+        """Stop the wheel from changing settings while scrolling the page.
+
+        Comboboxes (and spinboxes/scales on newer Tk) step their value on the
+        wheel from their class binding, which runs before bind_all ever sees
+        the event. Wrap those class bindings: over this page the wheel scrolls
+        the page and goes no further; elsewhere the original binding runs.
+        """
+        guard = self.register(self._value_wheel_guard)
+        for cls in self._VALUE_WHEEL_CLASSES:
+            original = self.tk.call("bind", cls, "<MouseWheel>")
+            self.tk.call("bind", cls, "<MouseWheel>",
+                         "if {[%s %%W %%D] eq \"break\"} break\n%s" % (guard, original))
+
+    def _value_wheel_guard(self, path, delta):
+        if not self._in_page(path):
+            return ""
+        self._scroll(int(float(delta)))
+        return "break"
+
+    def _in_page(self, path):
         canvas = str(self.canvas)
-        if not (path == canvas or path.startswith(canvas + ".")):
-            return
-        if isinstance(event.widget, ttk.Treeview):
-            return
+        return path == canvas or path.startswith(canvas + ".")
+
+    def _scroll(self, delta):
         first, last = self.canvas.yview()
         if first <= 0.0 and last >= 1.0:
             return
-        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        self.canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+
+    def _on_wheel(self, event):
+        # bind_all sees every wheel event in the app: act only on this page's
+        # own widgets, and leave the lid list to scroll itself.
+        if not self._in_page(str(event.widget)):
+            return
+        if isinstance(event.widget, ttk.Treeview):
+            return
+        self._scroll(event.delta)
 
 
 # =============================================================================
