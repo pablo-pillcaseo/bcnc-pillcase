@@ -1033,50 +1033,112 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         if self.lidName.get().strip():
             self._apply_defaults_to_main_fields_if_available(self.lidName.get().strip())
 
-    def get_shiphero_credentials(self):
-        endpoint = Utils.getStr("SurfAlign", "shipheroEndpoint")
-        num_parts_str = Utils.getStr("SurfAlign", "shipheroTokenParts")
-        token = ""
-        if num_parts_str and num_parts_str.isdigit():
-            num_parts = int(num_parts_str)
-            for i in range(num_parts):
-                chunk = keyring.get_password("bCNC", f"shipheroToken_{i}")
-                if chunk:
-                    token += chunk
-        else:
-            try:
-                token = keyring.get_password("bCNC", "shipheroToken") or ""
-            except Exception:
-                token = ""
-        return endpoint, token
+    SHIPHERO_AUTH_URL = "https://public-api.shiphero.com/auth/refresh"
 
-    def set_shiphero_credentials(self, endpoint, token):
+    # Minted access token and when to stop trusting it, shared by every frame.
+    # Held in memory only: the refresh token is the long-lived secret, and a
+    # fresh access token costs one request per bCNC session.
+    _shiphero_access = ""
+    _shiphero_access_expires = 0.0
+
+    @staticmethod
+    def _read_keyring_chunks(key, parts_option):
+        """Join a secret stored as 1000-char keyring chunks (Windows Credential
+        Manager caps one entry at 2560 bytes)."""
+        num_parts_str = Utils.getStr("SurfAlign", parts_option)
+        if not (num_parts_str and num_parts_str.isdigit()):
+            return ""
+        value = ""
+        for i in range(int(num_parts_str)):
+            try:
+                chunk = keyring.get_password("bCNC", f"{key}_{i}")
+            except Exception:
+                chunk = None
+            if chunk:
+                value += chunk
+        return value
+
+    @staticmethod
+    def _write_keyring_chunks(key, parts_option, value):
+        # Clear first so a shorter value leaves no stale tail behind it.
+        for i in range(20):
+            try:
+                keyring.delete_password("bCNC", f"{key}_{i}")
+            except Exception:
+                pass
+        chunk_size = 1000
+        chunks = [value[i:i+chunk_size] for i in range(0, len(value), chunk_size)]
+        for i, chunk in enumerate(chunks):
+            keyring.set_password("bCNC", f"{key}_{i}", chunk)
+        Utils.setStr("SurfAlign", parts_option, str(len(chunks)))
+
+    def get_shiphero_refresh_token(self):
+        return self._read_keyring_chunks("shipheroRefreshToken", "shipheroRefreshTokenParts")
+
+    def _refresh_shiphero_access_token(self, refresh_token):
+        """Exchange the refresh token for an access token, raising on failure."""
+        auth_url = Utils.getStr("SurfAlign", "shipheroAuthEndpoint", self.SHIPHERO_AUTH_URL)
+        response = requests.post(auth_url, json={"refresh_token": refresh_token}, timeout=10)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+        token = data.get("access_token") if isinstance(data, dict) else None
+        if response.status_code != 200 or not token:
+            reason = (data.get("message") or data.get("error") if isinstance(data, dict) else None) \
+                or response.text[:200] or f"HTTP {response.status_code}"
+            raise RuntimeError(_("token refresh failed: ") + str(reason))
+        try:
+            expires_in = float(data.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            expires_in = 0
+        # Refresh a day early (ShipHero issues ~28-day tokens); unknown lifetime
+        # means refresh again after an hour.
+        lifetime = expires_in - 86400 if expires_in > 2 * 86400 else (expires_in / 2 or 3600)
+        GenGcodeFrame._shiphero_access = token
+        GenGcodeFrame._shiphero_access_expires = time.time() + lifetime
+        return token
+
+    def get_shiphero_credentials(self, force_refresh=False):
+        """Return (endpoint, access token), minting the token from the stored
+        refresh token when there is none yet or it is due to expire. The token
+        is "" when no refresh token is saved; a failed refresh raises."""
+        endpoint = Utils.getStr("SurfAlign", "shipheroEndpoint")
+        refresh_token = self.get_shiphero_refresh_token()
+        if not refresh_token:
+            return endpoint, ""
+        if (force_refresh or not GenGcodeFrame._shiphero_access
+                or time.time() >= GenGcodeFrame._shiphero_access_expires):
+            return endpoint, self._refresh_shiphero_access_token(refresh_token)
+        return endpoint, GenGcodeFrame._shiphero_access
+
+    def set_shiphero_credentials(self, endpoint, refresh_token):
         Utils.addSection("SurfAlign")
         Utils.setStr("SurfAlign", "shipheroEndpoint", endpoint)
-        if token:
-            token = token.strip()
-            if token.lower().startswith("bearer "):
-                token = token[len("bearer "):].strip()
-            
+        if refresh_token:
+            refresh_token = refresh_token.strip()
+            if refresh_token.lower().startswith("bearer "):
+                refresh_token = refresh_token[len("bearer "):].strip()
+            if refresh_token != self.get_shiphero_refresh_token():
+                self._write_keyring_chunks("shipheroRefreshToken", "shipheroRefreshTokenParts",
+                                           refresh_token)
+                # The cached access token belongs to the old refresh token.
+                GenGcodeFrame._shiphero_access = ""
+                GenGcodeFrame._shiphero_access_expires = 0.0
+
+            # Drop the bearer token the old settings stored; it is no longer read.
             try:
                 keyring.delete_password("bCNC", "shipheroToken")
             except Exception:
                 pass
-            
-            chunk_size = 1000
-            chunks = [token[i:i+chunk_size] for i in range(0, len(token), chunk_size)]
-            
             for i in range(20):
                 try:
                     keyring.delete_password("bCNC", f"shipheroToken_{i}")
                 except Exception:
                     pass
-            
-            for i, chunk in enumerate(chunks):
-                keyring.set_password("bCNC", f"shipheroToken_{i}", chunk)
-            
-            Utils.setStr("SurfAlign", "shipheroTokenParts", str(len(chunks)))
-            
+            if Utils.config.has_option("SurfAlign", "shipheroTokenParts"):
+                Utils.config.remove_option("SurfAlign", "shipheroTokenParts")
+
         try:
             Utils.cleanConfiguration()
             with open(Utils.iniUser, "w") as f:
@@ -1100,11 +1162,16 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
             return
         scanned = order_number
 
-        endpoint, token = self.get_shiphero_credentials()
-        if not endpoint or not token:
-            if not self.show_shiphero_and_asset_config_dialog():
-                return
+        try:
             endpoint, token = self.get_shiphero_credentials()
+            if not endpoint or not token:
+                if not self.show_shiphero_and_asset_config_dialog():
+                    return
+                endpoint, token = self.get_shiphero_credentials()
+        except Exception as e:
+            self._scan_status(_("ShipHero ") + str(e), error=True)
+            self._focus_scan_field()
+            return
 
         if not endpoint or not token:
             self._scan_status(_("ShipHero credentials not found - open Settings."), error=True)
@@ -1197,6 +1264,16 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10
             )
+            # The access token can be revoked or expire before our own clock
+            # says so; mint a new one from the refresh token and try once more.
+            if response.status_code == 401:
+                endpoint, token = self.get_shiphero_credentials(force_refresh=True)
+                response = requests.post(
+                    endpoint,
+                    json={"query": query, "variables": variables},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10
+                )
             # ShipHero answers a rejected query with HTTP 400 AND a GraphQL
             # `errors` body. Checking the status first reported only "BAD
             # REQUEST" and threw away the reason, so read the body before it.
@@ -1296,8 +1373,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
         endpoint_var = StringVar(value=Utils.getStr("SurfAlign", "shipheroEndpoint", "https://public-api.shiphero.com/graphql"))
         Entry(api_frame, textvariable=endpoint_var, width=50).grid(row=0, column=1, sticky=W, pady=(0, 5))
 
-        Label(api_frame, text=_("Bearer Token:")).grid(row=1, column=0, sticky=E, pady=5, padx=(0, 5))
-        token_var = StringVar(value=keyring.get_password("bCNC", "shipheroToken") or "")
+        Label(api_frame, text=_("Refresh Token:")).grid(row=1, column=0, sticky=E, pady=5, padx=(0, 5))
+        token_var = StringVar(value=self.get_shiphero_refresh_token())
         Entry(api_frame, textvariable=token_var, width=50, show="*").grid(row=1, column=1, sticky=W, pady=5)
         
         Label(api_frame, text=_("Search By:")).grid(row=2, column=0, sticky=E, pady=5, padx=(0, 5))
