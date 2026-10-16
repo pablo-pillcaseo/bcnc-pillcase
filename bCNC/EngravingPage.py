@@ -26,6 +26,7 @@ import CNCRibbon
 import EngravingLog
 import EngravingSession as ES
 import LanSync
+import LidCamera
 import PillcaseOrder
 import Utils
 from Utils import _
@@ -56,6 +57,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self._run = None            # snapshot of the program run in progress
         self._pending_scan = None   # scanned before anyone logged in
         self._icon_cache = {}
+        self.lidcam = LidCamera.Controller(self)
 
         self._build()
         self._show_session()
@@ -150,12 +152,17 @@ class EngravingFrame(CNCRibbon.PageFrame):
                                   activeforeground="white", font=("", 11, "bold"))
         self.engrave_btn.pack(side=TOP, fill=X, pady=(4, 0))
         self.addWidget(self.engrave_btn)
+        # Photographs the bed and picks the lid in the list (LidCamera).
+        self.camera_btn = Button(box, text=_("📷  Identify Lid on Bed"),
+                                 command=lambda: self.lidcam.identify())
+        self.addWidget(self.camera_btn)
+        self.update_camera_button()
         self.warn_var = StringVar()
         warn_lbl = Label(box, textvariable=self.warn_var, fg="red", anchor=W, justify=LEFT,
                          wraplength=300)
         # Takes a line only while there is a warning to show
         self.warn_var.trace_add("write", lambda *a: warn_lbl.pack(
-            side=TOP, fill=X, after=self.engrave_btn) if self.warn_var.get() else warn_lbl.pack_forget())
+            side=TOP, fill=X, after=self._last_button()) if self.warn_var.get() else warn_lbl.pack_forget())
 
         style = ttk.Style()
         style.configure("EngravingItems.Treeview", rowheight=24)
@@ -248,6 +255,16 @@ class EngravingFrame(CNCRibbon.PageFrame):
         src.config(fg="gray", font=("", 8))
         Label(d, textvariable=self.d_warnings, justify=LEFT, anchor=NW, fg="red",
               font=("", 8), wraplength=320).grid(row=5, column=0, columnspan=2, sticky=NW)
+
+    def update_camera_button(self):
+        """Show Identify Lid only while the lid camera is switched on."""
+        if LidCamera.enabled():
+            self.camera_btn.pack(side=TOP, fill=X, pady=(2, 0), after=self.engrave_btn)
+        else:
+            self.camera_btn.pack_forget()
+
+    def _last_button(self):
+        return self.camera_btn if self.camera_btn.winfo_manager() else self.engrave_btn
 
     def _scan_label_text(self):
         mode = Utils.getStr("SurfAlign", "shipheroSearchMode", "Order")
@@ -398,6 +415,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self._refresh_tree()
         self._show()
         self._select_next()
+        self.lidcam.after_scan()
 
     # ================================================================ list
     def _completed(self):
@@ -560,26 +578,31 @@ class EngravingFrame(CNCRibbon.PageFrame):
     # ============================================================= engrave
     def engrave_selected(self, event=None):
         """Fill the G-code fields from the selected lid and generate its preview."""
+        self.prepare_selected()
+        return "break"
+
+    def prepare_selected(self):
+        """engrave_selected, saying whether the G-code is ready to run."""
         i, row = self._selected()
         if row is None:
             self._warn(_("Select a case first."))
-            return "break"
+            return False
         page = self._page()
         if self.app.running or (page is not None and page.busy()):
             self._warn(_("The machine is running - wait for it to finish."))
-            return "break"
+            return False
         if not ES.has_engraving(row):
             self._warn(_("This item has no Lid Engraving text."))
-            return "break"
+            return False
         lid = self._lid_for(i)
         if not lid:
             self._warn(_("This case type is not mapped to any Lid. Pick one from the Lid dropdown."))
-            return "break"
+            return False
         key = self.row_keys[i]
         if key in self._completed() and not messagebox.askyesno(
                 _("Already Engraved"),
                 _("This lid is already marked as engraved.\n\nEngrave it again?"), parent=self):
-            return "break"
+            return False
 
         text = str(row.get("engraving"))
         gen = self._gen()
@@ -601,15 +624,15 @@ class EngravingFrame(CNCRibbon.PageFrame):
             ok = gen.generateGcode()
         except Exception as e:
             self._status(_("GCode generation failed: ") + str(e), error=True)
+            return False
+        if ok:
+            self._status(_("Ready - check the preview for '%s' on %s, then press Align & Run.")
+                         % (text, lid))
+            if page is not None:
+                page.show_run()
         else:
-            if ok:
-                self._status(_("Ready - check the preview for '%s' on %s, then press Align & Run.")
-                             % (text, lid))
-                if page is not None:
-                    page.show_run()
-            else:
-                self._status(_("GCode generation failed - fields imported, not generated."), error=True)
-        return "break"
+            self._status(_("GCode generation failed - fields imported, not generated."), error=True)
+        return bool(ok)
 
     def _warn(self, msg):
         self.warn_var.set(msg)

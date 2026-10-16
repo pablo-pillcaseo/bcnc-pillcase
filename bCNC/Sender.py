@@ -104,6 +104,10 @@ class Sender:
         
         # BLTouc
         self.blt_serial = None
+        # Held for each servo command and for a whole camera capture, so the
+        # two never read each other's replies off the shared port.
+        self.blt_lock = threading.RLock()
+        self.blt_has_camera = None     # None until asked, then True/False
 
         self._posUpdate = False  # Update position
         self._probeUpdate = False  # Update probe
@@ -569,11 +573,13 @@ class Sender:
     def blt_serial_close(self):
         if self.blt_serial is None:
             return
-        try:
-            self.blt_serial.close()
-        except Exception:
-            pass
-        self.blt_serial = None
+        with self.blt_lock:     # never close the port under a capture
+            try:
+                self.blt_serial.close()
+            except Exception:
+                pass
+            self.blt_serial = None
+            self.blt_has_camera = None
         CNC.vars["blt_state"] = NOT_CONNECTED
 
     def blt_serial_send(self, cmd):
@@ -585,20 +591,49 @@ class Sender:
             return False
 
         if cmd in ['1', '2', '3', '4']:
-            self.blt_serial.write(cmd.encode())
-            print(f"[INFO] Sent command: {cmd}")
-            time.sleep(0.2)  # Wait briefly for response
+            with self.blt_lock:
+                self.blt_serial.write(cmd.encode())
+                print(f"[INFO] Sent command: {cmd}")
+                time.sleep(0.2)  # Wait briefly for response
 
-            if self.blt_serial.in_waiting:
-                response = self.blt_serial.readline().decode(errors='ignore').strip()
-                print(f"[INFO] Response: {response}")
-                return response
-            else:
-                print("[INFO] No response received.")
-                return True #TODO NEED TO CORRECT WITH RETURN FALSE
+                if self.blt_serial.in_waiting:
+                    response = self.blt_serial.readline().decode(errors='ignore').strip()
+                    print(f"[INFO] Response: {response}")
+                    return response
+                else:
+                    print("[INFO] No response received.")
+                    return True #TODO NEED TO CORRECT WITH RETURN FALSE
         else:
             print("[WARN] Invalid command. Use '1', '2', '3', or '4'.")
             return False
+
+    def blt_camera_capture(self):
+        """One photo from the lid camera on the BLTouch board -> BltCamera.Capture.
+
+        Raises BltCamera.CameraError when there is no port, the board runs the
+        probe-only firmware, or the capture fails. Blocking: run it off the Tk
+        thread. Holds the port lock throughout, so a servo command sent
+        meanwhile waits for the capture's reads to finish (the firmware itself
+        has already moved the servo by then).
+        """
+        import BltCamera
+
+        with self.blt_lock:
+            port = self.blt_serial
+            if port is None:
+                raise BltCamera.CameraError("the BLTouch port is not connected")
+            first = self.blt_has_camera is None
+            if first:
+                port.reset_input_buffer()
+                self.blt_has_camera = BltCamera.identify(port)
+            if not self.blt_has_camera:
+                raise BltCamera.CameraError(
+                    "the BLTouch board has no camera firmware (flash firmware/bltouch_camera)")
+            port.reset_input_buffer()
+            shot = BltCamera.capture(port, first=first)
+        for line in shot.other_lines:
+            print(f"[INFO] BLTouch during capture: {line}")
+        return shot
 
     # ----------------------------------------------------------------------
     # Send to controller a gcode or command

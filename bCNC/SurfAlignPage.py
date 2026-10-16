@@ -4089,6 +4089,7 @@ class LidEngravingsFrame(CNCRibbon.PageFrame):
 
     def add_setup_buttons(self, engraving, gen):
         for text, command in ((_("Engraving Station…"), engraving.show_settings_dialog),
+                              (_("Lid Camera…"), engraving.lidcam.show_settings_dialog),
                               (_("ShipHero & Assets…"), gen.show_shiphero_and_asset_config_dialog)):
             Button(self.setup_bar, text=text, command=command).pack(
                 side=LEFT, fill=X, expand=YES, padx=2)
