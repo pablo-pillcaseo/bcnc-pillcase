@@ -4,10 +4,10 @@
 A window showing, refreshed as fast as the camera delivers (about two photos a
 second):
 
-  * the camera's photo, with the markers it found (orange) and the lid outline
-    (green) drawn on it
-  * the top-down view in millimetres, white-balanced, that the lid is
-    measured in (once a marker is in view)
+  * the camera's photo, with the markers it found (orange), the lid outline
+    (green, or yellow when the lid runs off the edge of the view), and the
+    likeliest case named in large type next to it - no label when nothing on
+    the list matches
   * markers seen, the lid's measured size and colour, warnings, and the best
     matches among every configured lid in every thumbnail colour
 
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "bCNC"))
 
 import cv2 as cv  # noqa: E402
 import serial  # noqa: E402
-from PIL import Image, ImageTk  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 import BltCamera  # noqa: E402
 import LidVision  # noqa: E402
@@ -158,7 +158,6 @@ class Viewer:
         body = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashwidth=6, bg="#202020")
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.cam = self._panel(body, "Camera")
-        self.top = self._panel(body, "Top-down (mm, white-balanced)")
         info = tk.Frame(body, bg="#2a2a2a")
         self.info = tk.Text(info, width=40, bg="#2a2a2a", fg="#e8e8e8", bd=0,
                             highlightthickness=0, font=self.f_mono, wrap=tk.WORD,
@@ -170,9 +169,8 @@ class Viewer:
         self.info.tag_configure("bad", foreground="#ff8389")
         self.info.tag_configure("dim", foreground="#a0a0a0")
         win_w = int(sw * 0.9)
-        body.add(self.cam[0], stretch="always", minsize=300, width=int(win_w * 0.46))
-        body.add(self.top[0], stretch="always", minsize=200, width=int(win_w * 0.24))
-        body.add(info, minsize=300, width=int(win_w * 0.30))
+        body.add(self.cam[0], stretch="always", minsize=300, width=int(win_w * 0.72))
+        body.add(info, minsize=300, width=int(win_w * 0.28))
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<space>", lambda e: self.toggle_pause())
@@ -211,6 +209,10 @@ class Viewer:
 
     def _panel(self, parent, title):
         f = tk.Frame(parent, bg="#2a2a2a")
+        # The pane's size comes from the window, never from the image in it:
+        # otherwise each new image asks for the last one's size and the panes
+        # creep until one swallows the others.
+        f.pack_propagate(False)
         tk.Label(f, text=title, fg="#c6c6c6", bg="#2a2a2a", anchor="w",
                  font=self.f_text).pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 0))
         lbl = tk.Label(f, bg="#111111", font=self.f_text)
@@ -219,7 +221,9 @@ class Viewer:
 
     # ------------------------------------------------------------- images
     @staticmethod
-    def _show(label, bgr, placeholder):
+    def _show(label, bgr, placeholder, overlay=None):
+        """Show `bgr` fitted to `label`. `overlay(image, scale)` then draws on
+        the fitted PIL image, so what it draws keeps its size on screen."""
         w, h = max(label.winfo_width(), 50), max(label.winfo_height(), 50)
         if bgr is None:
             label.config(image="", text=placeholder, fg="#a0a0a0", compound=tk.CENTER)
@@ -229,27 +233,129 @@ class Viewer:
         scale = min(w / iw, h / ih)
         small = cv.resize(bgr, (max(1, int(iw * scale)), max(1, int(ih * scale))),
                           interpolation=cv.INTER_AREA)
-        photo = ImageTk.PhotoImage(Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB)))
+        image = Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB))
+        if overlay is not None:
+            overlay(image, scale)
+        photo = ImageTk.PhotoImage(image)
         label.config(image=photo, text="")
         label.image = photo
 
-    def _topdown(self, res):
-        if res.rectified is None:
+    # ------------------------------------------------------------ the tag
+    _fonts = {}
+
+    @classmethod
+    def _tag_font(cls, px, bold=True):
+        """A system sans font at `px` pixels (Noto Sans here, via fontconfig)."""
+        key = (px, bold)
+        if key not in cls._fonts:
+            font = None
+            try:
+                import subprocess
+                path = subprocess.run(["fc-match", "-f", "%{file}", "sans:bold" if bold else "sans"],
+                                      capture_output=True, text=True, timeout=2).stdout.strip()
+                font = ImageFont.truetype(path, px)
+                if bold:
+                    try:
+                        font.set_variation_by_name("Bold")     # a variable font
+                    except Exception:
+                        pass
+            except Exception:
+                font = ImageFont.load_default(size=px)
+            cls._fonts[key] = font
+        return cls._fonts[key]
+
+    def _tag_overlay(self, res):
+        """Draw the likeliest case's name on the lid, big, in the camera view."""
+        best = res.best
+
+        def draw(image, scale):
+            d = ImageDraw.Draw(image, "RGBA")
+            W, H = image.size
+            big = self._tag_font(max(22, int(W / 22)))
+            small = self._tag_font(max(16, int(W / 34)), bold=False)
+            # Only a real match gets a label: no lid, or a lid that is likelier
+            # none of the candidates than any one of them, shows nothing.
+            if res.lid_outline is None or best is None or best.probability <= res.none_probability:
+                return
+            p = best.probability
+            colour = (111, 220, 140) if p >= 0.8 else (241, 194, 27) if p >= 0.5 else (255, 131, 137)
+            name = best.first["lid"]
+            detail = "%s · %d%%" % (best.first["colour_key"].replace("_", " ").title(), round(p * 100))
+            if res.lid.length_is_min:
+                detail += " · runs off view"
+            outline = res.lid_outline * scale
+
+            # The tag goes beside the outline, never over the lid if it can be
+            # helped: full size on one line, then the name on two lines, then
+            # smaller type, until one fits above, below, right or left of it.
+            choice = None
+            for k in (1.0, 0.8, 0.65):
+                big = self._tag_font(max(18, int(W / 22 * k)))
+                small = self._tag_font(max(14, int(W / 34 * k)), bold=False)
+                for name_lines in ([name], self._split_name(name)):
+                    widths = [d.textlength(t, font=big) for t in name_lines]
+                    box_w = max(widths + [d.textlength(detail, font=small)]) + 36
+                    box_h = big.size * len(name_lines) + small.size + 40
+                    spot = self._place_tag(outline, box_w, box_h, W, H, inside_ok=False)
+                    if spot:
+                        choice = (big, small, name_lines, box_w, box_h, spot)
+                        break
+                if choice:
+                    break
+            if choice is None:                  # nowhere outside: inside, smallest
+                spot = self._place_tag(outline, box_w, box_h, W, H, inside_ok=True)
+                choice = (big, small, name_lines, box_w, box_h, spot)
+            big, small, name_lines, box_w, box_h, (x0, y0) = choice
+
+            d.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h), radius=14,
+                                fill=(0, 0, 0, 185), outline=colour + (255,), width=4)
+            y = y0 + 14
+            for t in name_lines:
+                d.text((x0 + box_w / 2, y), t, font=big, fill=colour, anchor="mt")
+                y += big.size
+            d.text((x0 + box_w / 2, y + 8), detail, font=small, fill=(235, 235, 235), anchor="mt")
+
+        return draw
+
+    @staticmethod
+    def _split_name(name):
+        """'Weekly AM-PM Vitamin XL Case' -> two lines of about equal length."""
+        words = name.split()
+        if len(words) < 2:
+            return [name]
+        best = min(range(1, len(words)),
+                   key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+        return [" ".join(words[:best]), " ".join(words[best:])]
+
+    @staticmethod
+    def _place_tag(outline, box_w, box_h, W, H, gap=12, inside_ok=True):
+        """Top-left corner for the tag, just outside the outline so it labels
+        the lid without covering it: above it if there is room, else below,
+        right or left, slid along to stay inside the picture. None if it fits
+        nowhere outside and `inside_ok` is False; else inside the top."""
+        left, top = outline.min(axis=0).tolist()
+        right, bottom = outline.max(axis=0).tolist()
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        if box_w > W - 12 or box_h > H - 12:
+            return None if not inside_ok else (6, 6)
+
+        def clamp_x(x):
+            return min(max(x, 6), W - box_w - 6)
+
+        def clamp_y(y):
+            return min(max(y, 6), H - box_h - 6)
+
+        if top - gap - box_h >= 6:                          # above
+            return clamp_x(cx - box_w / 2), top - gap - box_h
+        if bottom + gap + box_h <= H - 6:                   # below
+            return clamp_x(cx - box_w / 2), bottom + gap
+        if right + gap + box_w <= W - 6:                    # right
+            return right + gap, clamp_y(cy - box_h / 2)
+        if left - gap - box_w >= 6:                         # left
+            return left - gap - box_w, clamp_y(cy - box_h / 2)
+        if not inside_ok:
             return None
-        view = res.rectified.copy()
-        if res.lid is not None:
-            colour = (0, 200, 255) if res.lid.length_is_min else (0, 220, 0)   # as in the photo
-            cv.polylines(view, [res.lid.box_px.astype("int32")], True, colour, 2)
-        # 10 mm grid ticks along the edges, to read sizes by eye
-        x0, y0, x1, y1 = res.region
-        ppm = view.shape[1] / (x1 - x0)
-        for mm in range(int(x0 // 10 * 10), int(x1), 10):
-            x = int((mm - x0) * ppm)
-            cv.line(view, (x, 0), (x, 12 if mm % 50 else 24), (255, 255, 255), 1)
-        for mm in range(int(y0 // 10 * 10), int(y1), 10):
-            y = int((mm - y0) * ppm)
-            cv.line(view, (0, y), (12 if mm % 50 else 24, y), (255, 255, 255), 1)
-        return view
+        return clamp_x(cx - box_w / 2), clamp_y(top + gap)
 
     # --------------------------------------------------------------- text
     def _write_info(self, shot, res, t_cap, t_vis):
@@ -321,8 +427,7 @@ class Viewer:
             self.status.set("%s · %d photos · %.1f per second%s" % (
                 self.worker.port_name, self.frames, fps,
                 " · PAUSED" if self.worker.paused.is_set() else ""))
-            self._show(self.cam[1], res.annotated, "")
-            self._show(self.top[1], self._topdown(res), "No markers in view:\nno top-down view")
+            self._show(self.cam[1], res.annotated, "", self._tag_overlay(res))
             self._write_info(shot, res, t_cap, t_vis)
         self.root.after(50, self.poll)
 

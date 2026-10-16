@@ -151,6 +151,7 @@ class Result:
         self.rectified = None       # the white-balanced top-down view
         self.region = None          # (x0, y0, x1, y1) mm of `rectified`
         self.ppm = None             # its pixels per mm
+        self.lid_outline = None     # the lid's box in photo pixels (4x2), for labelling
 
     @property
     def best(self):
@@ -339,21 +340,23 @@ def white_balance(view, white):
 
 
 # --------------------------------------------------------------- the lid
-def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7, max_width=MAX_LID_MM[0]):
+def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7, max_width=MAX_LID_MM[0],
+                 min_width=MIN_LID_MM):
     """Largest plausible lid outline among `contours` -> Lid, or None.
 
-    `max_width`: nothing wider is a lid. Kept to just above the widest lid that
-    could be on the bed, so a fixture plate or a sheet of stock, which can be a
-    bigger rectangle than the lid, is not taken for it.
+    `max_width` / `min_width`: nothing wider or narrower is a lid. Kept just
+    outside the widest and narrowest lids that could be on the bed, so a fixture
+    plate (a bigger rectangle than the lid) or a strip of paper or tape (a
+    smaller one) is not taken for it.
     """
     best = None
     for c in contours:
         area = cv.contourArea(c)
-        if area < (MIN_LID_MM * ppm) ** 2:
+        if area < (min_width * ppm) ** 2:
             continue
         (cx, cy), (w, h), ang = cv.minAreaRect(c)
         short, long_ = sorted((w / ppm, h / ppm))
-        if short < MIN_LID_MM or short > max_width or long_ > MAX_LID_MM[1]:
+        if short < min_width or short > max_width or long_ > MAX_LID_MM[1]:
             continue
         # A lid is a rectangle; a blob that fills little of its box is clutter.
         if area / max(w * h, 1.0) < min_fill:
@@ -370,7 +373,7 @@ def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7, max_width=MAX_LID_M
     return Lid((dims[0], dims[1]), (cx / ppm, cy / ppm), ang, lid_mask, box, method)
 
 
-def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0]):
+def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0], min_width=MIN_LID_MM):
     """Tighten a lid's outline with GrabCut, seeded from the rough box.
 
     The rough outline is a few pixels off either way: an edge band has width,
@@ -410,7 +413,8 @@ def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0]):
     full = np.zeros((h, w), np.uint8)
     full[y0:y1, x0:x1] = fg
     contours, _h = cv.findContours(full, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
-    refined = _blob_to_lid(contours, view.shape, ppm, method, max_width=max_width)
+    refined = _blob_to_lid(contours, view.shape, ppm, method, max_width=max_width,
+                           min_width=min_width)
     if refined is None:
         return lid
     # GrabCut can bleed into a bed of a similar colour. Keep the rough answer
@@ -420,7 +424,8 @@ def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0]):
     return refined
 
 
-def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_LID_MM[0]):
+def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_LID_MM[0],
+                           min_width=MIN_LID_MM):
     """The lid as what changed since the empty-bed photo."""
     if background.shape[:2] != view.shape[:2]:
         # An older record whose scale was rounded: off by a pixel at most.
@@ -436,11 +441,12 @@ def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_
     mask = cv.morphologyEx(mask, cv.MORPH_OPEN, k)
     mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, k, iterations=2)
     contours, _h = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    lid = _blob_to_lid(contours, mask.shape, ppm, "background", max_width=max_width)
-    return lid and refine_lid(view, lid, ppm, "background", max_width)
+    lid = _blob_to_lid(contours, mask.shape, ppm, "background", max_width=max_width,
+                       min_width=min_width)
+    return lid and refine_lid(view, lid, ppm, "background", max_width, min_width)
 
 
-def find_lid_by_edges(view, valid, exclude, ppm, max_width=MAX_LID_MM[0]):
+def find_lid_by_edges(view, valid, exclude, ppm, max_width=MAX_LID_MM[0], min_width=MIN_LID_MM):
     """The lid as the largest closed rectangular outline (no empty-bed photo).
 
     Every closed outline is a candidate, nested ones included: the fixture or
@@ -463,8 +469,9 @@ def find_lid_by_edges(view, valid, exclude, ppm, max_width=MAX_LID_MM[0]):
     k = cv.getStructuringElement(cv.MORPH_ELLIPSE, (int(ppm * 2) | 1, int(ppm * 2) | 1))
     closed = cv.morphologyEx(edges, cv.MORPH_CLOSE, k)
     contours, _h = cv.findContours(closed, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
-    lid = _blob_to_lid(contours, view.shape, ppm, "edges", min_fill=0.85, max_width=max_width)
-    return lid and refine_lid(view, lid, ppm, "edges", max_width)
+    lid = _blob_to_lid(contours, view.shape, ppm, "edges", min_fill=0.85, max_width=max_width,
+                       min_width=min_width)
+    return lid and refine_lid(view, lid, ppm, "edges", max_width, min_width)
 
 
 def mark_clipped(lid, valid, ppm):
@@ -755,19 +762,22 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
         view = white_balance(view, white)
         res.rectified, res.region, res.ppm = view, region, ppm
         exclude = marker_mask(view.shape, plane, region, ppm)
-        # The widest lid that could be on the bed, plus room for measurement
-        # error and size correction. Without candidates, the generic limit.
+        # The widest and narrowest lids that could be on the bed, plus room for
+        # measurement error and size correction. Without candidates, the
+        # generic limits.
         widths = [min(c["size"]) for c in candidates if c.get("size")]
-        max_width = (max(widths) / max(size_scale, 0.5)) * 1.1 + 4.0 if widths else MAX_LID_MM[0]
+        scale = max(size_scale, 0.5)
+        max_width = (max(widths) / scale) * 1.1 + 4.0 if widths else MAX_LID_MM[0]
+        min_width = max(MIN_LID_MM, (min(widths) / scale) * 0.9 - 4.0) if widths else MIN_LID_MM
 
         if use_bg:
             lid = find_lid_by_background(view, valid, background["image"], exclude, ppm,
-                                         max_width)
+                                         max_width, min_width)
         if lid is None:
             if background and not use_bg:
                 res.warnings.append("Empty-bed photo not used (its anchor marker is "
                                     "not in view): finding the lid by its edges.")
-            lid = find_lid_by_edges(view, valid, exclude, ppm, max_width)
+            lid = find_lid_by_edges(view, valid, exclude, ppm, max_width, min_width)
 
         if lid is None:
             res.warnings.append("No lid found on the bed.")
@@ -783,6 +793,7 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
                        % lid.size_mm[1]))
             colour = colour_of_region(view, lid.mask, ppm)
             box_img = _map(np.linalg.inv(M), lid.box_px).astype(np.int32)
+            res.lid_outline = box_img
             # Green when the whole lid is in view, yellow when it runs off it.
             cv.polylines(annotated, [box_img], True,
                          (0, 200, 255) if lid.length_is_min else (0, 220, 0), 3)
