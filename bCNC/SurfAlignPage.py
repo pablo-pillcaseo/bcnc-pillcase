@@ -9,7 +9,10 @@ from Utils import _
 import math
 import sys
 import time
-import winreg
+try:
+    import winreg
+except ImportError:     # not Windows: no system font list (lid camera testing on Linux)
+    winreg = None
 import re
 from tkinter import (
     YES,
@@ -461,6 +464,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     # =====================================================================================
 
     def get_installed_font_names(self):
+        if winreg is None:
+            return []
         font_dir = os.path.join(os.environ['WINDIR'], 'Fonts')
         font_names = []
         try:
@@ -507,6 +512,8 @@ class GenGcodeFrame(CNCRibbon.PageFrame):
     
     def load_fonts_from_registry(self):
         font_dict = {}
+        if winreg is None:
+            return font_dict
         fonts_dir = os.path.join(os.environ["WINDIR"], "Fonts")
 
         try:

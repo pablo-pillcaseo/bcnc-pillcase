@@ -11,7 +11,10 @@ import bpy
 import sys
 import warnings
 import math
-import winreg
+try:
+    import winreg
+except ImportError:     # not Windows: no system font list (lid camera testing on Linux)
+    winreg = None
 import bmesh
 import fabex
 import mathutils
@@ -28,6 +31,8 @@ def resolve_windows_font_path(display_name):
     Given a display name like 'Arial' or 'Bahnschrift SemiLight SemiConde',
     this function returns the actual font file path.
     """
+    if winreg is None:
+        return None
     display_name = display_name.lower()
     fonts_dir = os.path.join(os.environ["WINDIR"], "Fonts")
 
@@ -44,6 +49,8 @@ def resolve_windows_font_path(display_name):
 
 
 def resolve_font_path(font_name):
+    if winreg is None:
+        return None
     font_name = font_name.strip().lower()
     fonts_dir = os.path.join(os.environ["WINDIR"], "Fonts")
 
