@@ -12,10 +12,16 @@ The camera shares the probe's serial port and the probe's XIAO ESP32S3 Sense
     and only its reply line waits.
 
 Frame format (one capture):
-    @IMG <seq> <length> <width> <height>\\n
-    @CHK <offset> <n>\\n <n raw bytes>          until <length> bytes are sent
-    @END <seq> <crc32 hex>\\n
+    @IMG <seq> <length> <width> <height> <token>\\n
+    @CHK <offset> <n> <crc32 hex> <token>\\n <n raw bytes>   until done
+    @END <seq> <crc32 hex> <token>\\n
 or  @ERR <seq> <reason>\\n
+
+The host acknowledges each piece by echoing its <token> (K and J alternate),
+and the board waits for that before sending the next, re-sending a piece that
+is not acknowledged. The ESP32's USB serial driver drops writes under load, so
+delivery is checked here; the alternating token stops a late acknowledgement
+of a re-sent piece from confirming the piece after it.
 
 Ordinary text lines ("Touch", a servo reply) can arrive between chunks. They
 are whole lines and are passed back to the caller rather than dropped, so the
@@ -25,6 +31,7 @@ Pure Python over anything with read/readline/write/reset_input_buffer, so the
 parser is tested without hardware.
 """
 
+import re
 import time
 import zlib
 
@@ -56,29 +63,39 @@ class Capture:
         self.other_lines = other_lines
 
 
-def _readline(port, deadline):
-    """One line, or CameraError at the deadline. Partial reads are joined: the
-    port's own timeout is short, and a line can straddle several reads."""
-    buf = b""
-    while True:
-        if time.time() > deadline:
-            raise CameraError("timed out waiting for the camera")
-        part = port.readline()
-        if part:
-            buf += part
-            if buf.endswith(b"\n"):
-                return buf.decode("ascii", "replace").strip()
+class _Reader:
+    """Buffered reads off the port. pyserial's readline() fetches one byte per
+    call, which is too slow to keep up with a 2 kB chunk arriving every few
+    ms: acknowledgements fall behind and the board starts re-sending."""
 
+    def __init__(self, port):
+        self.port = port
+        self.buf = bytearray()
 
-def _read_exact(port, n, deadline):
-    buf = bytearray()
-    while len(buf) < n:
+    def _fill(self, deadline, what):
         if time.time() > deadline:
-            raise CameraError("timed out reading image data")
-        part = port.read(n - len(buf))
+            raise CameraError(what)
+        waiting = getattr(self.port, "in_waiting", 0) or 1
+        part = self.port.read(max(waiting, 1))
         if part:
-            buf += part
-    return bytes(buf)
+            self.buf += part
+
+    def readline(self, deadline):
+        """One line, stripped, or CameraError at the deadline."""
+        while True:
+            i = self.buf.find(b"\n")
+            if i >= 0:
+                line = bytes(self.buf[:i + 1])
+                del self.buf[:i + 1]
+                return line.decode("ascii", "replace").strip()
+            self._fill(deadline, "timed out waiting for the camera")
+
+    def read_exact(self, n, deadline):
+        while len(self.buf) < n:
+            self._fill(deadline, "timed out reading image data")
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
 
 
 def identify(port, timeout_s=IDENTIFY_TIMEOUT_S):
@@ -86,65 +103,134 @@ def identify(port, timeout_s=IDENTIFY_TIMEOUT_S):
     False when it runs the old probe-only firmware (which ignores 'I')."""
     port.write(IDENTIFY)
     deadline = time.time() + timeout_s
+    reader = _Reader(port)
     try:
         while True:
-            line = _readline(port, deadline)
+            line = reader.readline(deadline)
             if line.startswith(IDENTIFY_REPLY):
                 return line.split()[-1] == "camera"
     except CameraError:
         return False
 
 
+TAGS = ("@IMG", "@CHK", "@END", "@ERR")
+ACK = b"K"
+NAK = b"N"     # the last chunk arrived damaged: the board re-sends it at once
+_CHK_HEADER = re.compile(rb"@CHK \d{1,7} \d{1,5} [0-9a-f]{8}(?: [KJ])?\r?\n")
+
+
+def _tagged(line):
+    """The protocol line inside `line`, or None. A header can arrive glued to
+    the tail of a damaged chunk, so the last tag anywhere in the line counts."""
+    best = -1
+    for tag in TAGS:
+        best = max(best, line.rfind(tag))
+    return line[best:] if best >= 0 else None
+
+
+def _token(parts):
+    """The acknowledgement a piece asks for: its last field when that is K or J."""
+    last = parts[-1] if parts else ""
+    return last.encode() if last in ("K", "J") else ACK
+
+
+def _printable(line):
+    return line and all(32 <= ord(ch) < 127 for ch in line)
+
+
 def read_capture(port, timeout_s=CAPTURE_TIMEOUT_S):
-    """Parse one framed capture from the port. The 'C' must already be sent."""
+    """Parse one framed capture from the port. The 'C' must already be sent.
+
+    Every @IMG and good @CHK is acknowledged with 'K'; the board re-sends
+    anything not acknowledged. A chunk whose checksum fails is not
+    acknowledged, so it comes again, and a repeat of one already stored is
+    acknowledged and dropped.
+    """
     deadline = time.time() + timeout_s
+    reader = _Reader(port)
     other = []
-    header = None
-    while header is None:
-        line = _readline(port, deadline)
-        if line.startswith("@ERR"):
-            raise CameraError(line.split(None, 2)[-1] if len(line.split()) > 2 else line)
-        if line.startswith("@IMG"):
-            header = line
-        elif line:
-            other.append(line)
-
-    try:
-        _tag, seq, length, width, height = header.split()
-        seq, length, width, height = int(seq), int(length), int(width), int(height)
-    except ValueError:
-        raise CameraError("bad image header: %r" % header)
-    if not 0 < length <= MAX_IMAGE_BYTES:
-        raise CameraError("implausible image size: %d bytes" % length)
-
-    data = bytearray(length)
+    seq = length = width = height = None
+    data = None
     received = 0
     while True:
-        line = _readline(port, deadline)
-        if line.startswith("@CHK"):
+        line = reader.readline(deadline)
+        tagged = _tagged(line)
+        if tagged is None:
+            # Bytes whose header was lost: the board re-sends that chunk when
+            # its acknowledgement does not come. No NAK here: one lost header
+            # can leave several such lines, and each NAK costs a re-send.
+            if _printable(line):
+                other.append(line)
+            continue
+        parts = tagged.split()
+        tag = parts[0]
+
+        # A late @END or @ERR re-sent for an earlier photo is not this one's.
+        try:
+            msg_seq = int(parts[1])
+        except (IndexError, ValueError):
+            msg_seq = None
+        if tag in ("@END", "@ERR") and seq is not None and msg_seq != seq:
+            continue
+
+        if tag == "@ERR":
+            raise CameraError(" ".join(parts[2:]) or tagged)
+
+        if tag == "@IMG":
             try:
-                _tag, off, n = line.split()
-                off, n = int(off), int(n)
+                new_seq, new_len, new_w, new_h = (int(v) for v in parts[1:5])
             except ValueError:
-                raise CameraError("bad chunk header: %r" % line)
-            if off != received or n <= 0 or off + n > length:
-                raise CameraError("chunk out of order at byte %d" % off)
-            data[off:off + n] = _read_exact(port, n, deadline)
-            received += n
-        elif line.startswith("@END"):
-            parts = line.split()
+                continue                    # damaged header: it will come again
+            if seq is not None and new_seq != seq:
+                continue
+            seq, length, width, height = new_seq, new_len, new_w, new_h
+            if not 0 < length <= MAX_IMAGE_BYTES:
+                raise CameraError("implausible image size: %d bytes" % length)
+            if data is None:
+                data = bytearray(length)
+            port.write(_token(parts))
+            continue
+
+        if tag == "@CHK":
+            try:
+                off, n, crc = int(parts[1]), int(parts[2]), int(parts[3], 16)
+            except (IndexError, ValueError):
+                continue
+            if data is None or n <= 0 or off + n > length:
+                continue
+            chunk = reader.read_exact(n, deadline)
+            if zlib.crc32(chunk) & 0xFFFFFFFF != crc:
+                # A short (partly dropped) chunk makes the fixed-length read
+                # run on into whatever came next, usually its re-send. Put
+                # back everything from the first header found in it, so the
+                # parser picks up from there instead of staying out of step.
+                # Only a complete chunk header counts: image bytes can contain
+                # "@END" or "@CHK" by chance, but hardly this whole pattern.
+                m = _CHK_HEADER.search(chunk)
+                if m:
+                    reader.buf[0:0] = chunk[m.start():]
+                else:
+                    port.write(NAK)
+                continue
+            if off == received:
+                data[off:off + n] = chunk
+                received += n
+            elif off > received:
+                continue                    # cannot happen unless lost sync
+            port.write(_token(parts))       # a repeat is acknowledged again
+            continue
+
+        if tag == "@END":
+            if data is None:
+                continue                    # an earlier photo's, re-sent
+            port.write(_token(parts))
             if received != length:
-                raise CameraError("image ended after %d of %d bytes" % (received, length))
+                raise CameraError("image ended after %d of %s bytes" % (received, length))
             if len(parts) >= 3:
                 want = int(parts[2], 16)
-                got = zlib.crc32(bytes(data)) & 0xFFFFFFFF
-                if want != got:
+                if zlib.crc32(bytes(data)) & 0xFFFFFFFF != want:
                     raise CameraError("image checksum mismatch")
             return Capture(bytes(data), width, height, seq, other)
-        elif line.startswith("@ERR"):
-            raise CameraError(line)
-        elif line:
-            other.append(line)
 
 
 def capture(port, first=False):
