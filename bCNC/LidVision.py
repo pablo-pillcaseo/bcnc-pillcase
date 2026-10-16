@@ -103,12 +103,23 @@ class Lid:
     """What was found on the bed."""
 
     def __init__(self, size_mm, centre_mm, angle, mask, box_px, method):
-        self.size_mm = size_mm          # (short, long)
+        # (short, long), or (width, visible length) when the lid runs off the
+        # edge of the view (length_is_min): then the length is only a minimum.
+        self.size_mm = size_mm
+        self.length_is_min = False
+        self.width_is_min = False
         self.centre_mm = centre_mm
         self.angle = angle
         self.mask = mask                # in the rectified view
         self.box_px = box_px            # 4x2 rectified-view corners
         self.method = method            # "background" or "edges"
+
+
+def describe_size(lid):
+    """'48.3 x 221.0 mm', or '48.3 x ≥225.5 mm' when the length runs off the view."""
+    w, l = lid.size_mm
+    return "%s%.1f x %s%.1f mm" % ("≥" if lid.width_is_min else "", w,
+                                   "≥" if lid.length_is_min else "", l)
 
 
 class Match:
@@ -139,6 +150,7 @@ class Result:
         self.annotated = None       # BGR photo with what was found drawn on it
         self.rectified = None       # the white-balanced top-down view
         self.region = None          # (x0, y0, x1, y1) mm of `rectified`
+        self.ppm = None             # its pixels per mm
 
     @property
     def best(self):
@@ -327,8 +339,13 @@ def white_balance(view, white):
 
 
 # --------------------------------------------------------------- the lid
-def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7):
-    """Largest plausible lid outline among `contours` -> Lid, or None."""
+def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7, max_width=MAX_LID_MM[0]):
+    """Largest plausible lid outline among `contours` -> Lid, or None.
+
+    `max_width`: nothing wider is a lid. Kept to just above the widest lid that
+    could be on the bed, so a fixture plate or a sheet of stock, which can be a
+    bigger rectangle than the lid, is not taken for it.
+    """
     best = None
     for c in contours:
         area = cv.contourArea(c)
@@ -336,7 +353,7 @@ def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7):
             continue
         (cx, cy), (w, h), ang = cv.minAreaRect(c)
         short, long_ = sorted((w / ppm, h / ppm))
-        if short < MIN_LID_MM or short > MAX_LID_MM[0] or long_ > MAX_LID_MM[1]:
+        if short < MIN_LID_MM or short > max_width or long_ > MAX_LID_MM[1]:
             continue
         # A lid is a rectangle; a blob that fills little of its box is clutter.
         if area / max(w * h, 1.0) < min_fill:
@@ -353,7 +370,7 @@ def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7):
     return Lid((dims[0], dims[1]), (cx / ppm, cy / ppm), ang, lid_mask, box, method)
 
 
-def refine_lid(view, lid, ppm, method):
+def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0]):
     """Tighten a lid's outline with GrabCut, seeded from the rough box.
 
     The rough outline is a few pixels off either way: an edge band has width,
@@ -393,7 +410,7 @@ def refine_lid(view, lid, ppm, method):
     full = np.zeros((h, w), np.uint8)
     full[y0:y1, x0:x1] = fg
     contours, _h = cv.findContours(full, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
-    refined = _blob_to_lid(contours, view.shape, ppm, method)
+    refined = _blob_to_lid(contours, view.shape, ppm, method, max_width=max_width)
     if refined is None:
         return lid
     # GrabCut can bleed into a bed of a similar colour. Keep the rough answer
@@ -403,8 +420,11 @@ def refine_lid(view, lid, ppm, method):
     return refined
 
 
-def find_lid_by_background(view, valid, background, exclude, ppm):
+def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_LID_MM[0]):
     """The lid as what changed since the empty-bed photo."""
+    if background.shape[:2] != view.shape[:2]:
+        # An older record whose scale was rounded: off by a pixel at most.
+        background = cv.resize(background, (view.shape[1], view.shape[0]))
     a = cv.GaussianBlur(cv.cvtColor(view, cv.COLOR_BGR2LAB), (0, 0), 1.5).astype(np.int16)
     b = cv.GaussianBlur(cv.cvtColor(background, cv.COLOR_BGR2LAB), (0, 0), 1.5).astype(np.int16)
     diff = np.abs(a - b)
@@ -416,11 +436,11 @@ def find_lid_by_background(view, valid, background, exclude, ppm):
     mask = cv.morphologyEx(mask, cv.MORPH_OPEN, k)
     mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, k, iterations=2)
     contours, _h = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    lid = _blob_to_lid(contours, mask.shape, ppm, "background")
-    return lid and refine_lid(view, lid, ppm, "background")
+    lid = _blob_to_lid(contours, mask.shape, ppm, "background", max_width=max_width)
+    return lid and refine_lid(view, lid, ppm, "background", max_width)
 
 
-def find_lid_by_edges(view, valid, exclude, ppm):
+def find_lid_by_edges(view, valid, exclude, ppm, max_width=MAX_LID_MM[0]):
     """The lid as the largest closed rectangular outline (no empty-bed photo).
 
     Every closed outline is a candidate, nested ones included: the fixture or
@@ -432,13 +452,57 @@ def find_lid_by_edges(view, valid, exclude, ppm):
     edges = np.zeros(view.shape[:2], np.uint8)
     for ch in cv.split(lab):
         edges |= cv.Canny(ch, 20, 60)
-    edges[cv.erode(valid, np.ones((9, 9), np.uint8)) == 0] = 0
+    # The edge of the photo is not an edge of anything: drop what is found
+    # there, then draw the edge of the view in as a line, so a lid that runs
+    # off the photo still has a closed outline (its own three sides plus the
+    # edge of the view).
+    inner = cv.erode(valid, np.ones((9, 9), np.uint8))
+    edges[inner == 0] = 0
+    edges |= inner - cv.erode(inner, np.ones((3, 3), np.uint8))
     edges[cv.dilate(exclude, np.ones((5, 5), np.uint8)) > 0] = 0
     k = cv.getStructuringElement(cv.MORPH_ELLIPSE, (int(ppm * 2) | 1, int(ppm * 2) | 1))
     closed = cv.morphologyEx(edges, cv.MORPH_CLOSE, k)
     contours, _h = cv.findContours(closed, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
-    lid = _blob_to_lid(contours, view.shape, ppm, "edges", min_fill=0.85)
-    return lid and refine_lid(view, lid, ppm, "edges")
+    lid = _blob_to_lid(contours, view.shape, ppm, "edges", min_fill=0.85, max_width=max_width)
+    return lid and refine_lid(view, lid, ppm, "edges", max_width)
+
+
+def mark_clipped(lid, valid, ppm):
+    """Flag a lid that runs off the edge of the view, and which way.
+
+    Its pixels next to the edge of the view tell which sides of its box are
+    cut off. A cut across the box's long axis means only part of the length is
+    in view: the width is still measured exactly, the length becomes a minimum.
+    """
+    near_edge = cv.dilate((valid == 0).astype(np.uint8), np.ones((int(3 * ppm) | 1,) * 2, np.uint8))
+    ys, xs = np.nonzero((lid.mask > 0) & (near_edge > 0))
+    if len(xs) == 0:
+        return lid
+    p0, p1, _p2, p3 = lid.box_px.astype(np.float64)
+    pts = np.stack([xs, ys], axis=1).astype(np.float64) - p0
+    axes = (p1 - p0, p3 - p0)
+    ts, tols = [], []
+    for axis in axes:
+        length2 = max(float(axis @ axis), 1e-6)
+        ts.append(pts @ axis / length2)             # 0..1 along this side
+        tols.append(3 * ppm / math.sqrt(length2))
+    clipped = []
+    for i in (0, 1):
+        t, other = ts[i], ts[1 - i]
+        at_end = (t < tols[i]) | (t > 1 - tols[i])
+        # Cut off only if the contact runs along a good part of that end: a
+        # corner grazing a slanted edge of the view touches both sides.
+        spread = float(np.ptp(other[at_end])) if np.any(at_end) else 0.0
+        clipped.append(spread > 0.3)
+    sides = (np.linalg.norm(p1 - p0) / ppm, np.linalg.norm(p3 - p0) / ppm)
+    if clipped[0] and clipped[1]:
+        lid.size_mm = tuple(sorted(sides))
+        lid.length_is_min = lid.width_is_min = True
+    elif clipped[0] or clipped[1]:
+        cut = 0 if clipped[0] else 1
+        lid.size_mm = (sides[1 - cut], sides[cut])  # (width, visible length)
+        lid.length_is_min = True
+    return lid
 
 
 # ----------------------------------------------------------------- colour
@@ -586,17 +650,23 @@ class ColourMemory:
 
 
 # ------------------------------------------------------------------ scoring
-def size_error(measured, lid_size):
-    """How many sigmas a measured (short, long) is from a lid's size."""
+def size_error(measured, lid_size, length_is_min=False, width_is_min=False):
+    """How many sigmas a measured (short, long) is from a lid's size.
+
+    A dimension that is only a minimum (the lid runs off the view) counts
+    against a lid only when the lid is shorter than what is already in view.
+    """
     want = sorted(lid_size)
     err = 0.0
-    for m, w in zip(measured, want):
+    for m, w, is_min in zip(measured, want, (width_is_min, length_is_min)):
         sigma = SIZE_SIGMA_MM + SIZE_SIGMA_FRAC * w
-        err += ((m - w) / sigma) ** 2
+        d = max(0.0, m - w) if is_min else m - w
+        err += (d / sigma) ** 2
     return math.sqrt(err)
 
 
-def score(candidates, measured_size, colour, reference_colour):
+def score(candidates, measured_size, colour, reference_colour, length_is_min=False,
+          width_is_min=False):
     """Rank candidates. Returns ([Match], none_probability).
 
     `candidates`: dicts with `key` (grouping: same lid + colour), `size`
@@ -614,7 +684,7 @@ def score(candidates, measured_size, colour, reference_colour):
         log_l = 0.0
         s_err = None
         if measured_size is not None and c.get("size"):
-            s_err = size_error(measured_size, c["size"])
+            s_err = size_error(measured_size, c["size"], length_is_min, width_is_min)
             log_l -= 0.5 * s_err ** 2
         elif measured_size is not None:
             notes.append("lid size not configured")
@@ -683,25 +753,39 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
         if white is None:
             res.warnings.append("No white marker border found: colour is not corrected.")
         view = white_balance(view, white)
-        res.rectified, res.region = view, region
+        res.rectified, res.region, res.ppm = view, region, ppm
         exclude = marker_mask(view.shape, plane, region, ppm)
+        # The widest lid that could be on the bed, plus room for measurement
+        # error and size correction. Without candidates, the generic limit.
+        widths = [min(c["size"]) for c in candidates if c.get("size")]
+        max_width = (max(widths) / max(size_scale, 0.5)) * 1.1 + 4.0 if widths else MAX_LID_MM[0]
 
         if use_bg:
-            lid = find_lid_by_background(view, valid, background["image"], exclude, ppm)
+            lid = find_lid_by_background(view, valid, background["image"], exclude, ppm,
+                                         max_width)
         if lid is None:
             if background and not use_bg:
                 res.warnings.append("Empty-bed photo not used (its anchor marker is "
                                     "not in view): finding the lid by its edges.")
-            lid = find_lid_by_edges(view, valid, exclude, ppm)
+            lid = find_lid_by_edges(view, valid, exclude, ppm, max_width)
 
         if lid is None:
             res.warnings.append("No lid found on the bed.")
         else:
+            lid = mark_clipped(lid, valid, ppm)
             lid.size_mm = (lid.size_mm[0] * size_scale, lid.size_mm[1] * size_scale)
             res.lid = lid
+            if lid.length_is_min:
+                res.warnings.append(
+                    "The lid runs off the edge of the camera's view: %s"
+                    % ("only a part of it is measured." if lid.width_is_min else
+                       "its width is measured, its length only as at least %.0f mm."
+                       % lid.size_mm[1]))
             colour = colour_of_region(view, lid.mask, ppm)
             box_img = _map(np.linalg.inv(M), lid.box_px).astype(np.int32)
-            cv.polylines(annotated, [box_img], True, (0, 220, 0), 3)
+            # Green when the whole lid is in view, yellow when it runs off it.
+            cv.polylines(annotated, [box_img], True,
+                         (0, 200, 255) if lid.length_is_min else (0, 220, 0), 3)
 
     res.colour = colour
     res.colour_lab = None if colour is None else colour.median
@@ -709,7 +793,8 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
         res.matches, res.none_probability = [], 1.0
     else:
         res.matches, res.none_probability = score(
-            candidates, lid.size_mm if lid else None, colour, reference_colour)
+            candidates, lid.size_mm if lid else None, colour, reference_colour,
+            bool(lid and lid.length_is_min), bool(lid and lid.width_is_min))
     res.annotated = annotated
     return res
 
@@ -718,6 +803,5 @@ def background_record(result, marker_mm):
     """What to keep from an empty-bed photo's Result, or None if unusable."""
     if result.plane is None or result.rectified is None:
         return None
-    return {"image": result.rectified, "region": list(result.region),
-            "ppm": result.rectified.shape[1] / (result.region[2] - result.region[0]),
+    return {"image": result.rectified, "region": list(result.region), "ppm": result.ppm,
             "ref": result.plane.ref, "marker_mm": marker_mm}

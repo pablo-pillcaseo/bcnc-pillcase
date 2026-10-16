@@ -124,7 +124,7 @@ def main():
         return
 
     if res.lid:
-        print("lid: %.1f x %.1f mm, found by %s" % (res.lid.size_mm + (res.lid.method,)))
+        print("lid: %s, found by %s" % (LidVision.describe_size(res.lid), res.lid.method))
     if res.colour_lab is not None:
         print("colour (Lab median): L %.0f  a %.0f  b %.0f" % tuple(res.colour_lab))
     print("best matches:")

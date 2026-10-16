@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -125,8 +126,9 @@ class Worker(threading.Thread):
 
 
 class Viewer:
-    def __init__(self, root, worker, out_dir, marker_mm):
+    def __init__(self, root, worker, out_dir, marker_mm, font_size):
         self.root = root
+        self._setup_fonts(font_size)
         self.worker = worker
         self.out_dir = out_dir
         self.marker_mm = marker_mm
@@ -136,7 +138,8 @@ class Viewer:
         self.times = []
 
         root.title("Lid Camera - live view")
-        root.geometry("1400x820")
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry("%dx%d" % (int(sw * 0.9), int(sh * 0.85)))
         root.configure(bg="#202020")
 
         bar = tk.Frame(root, bg="#202020")
@@ -148,34 +151,69 @@ class Viewer:
         ttk.Button(bar, text="Clear Empty Bed", command=self.clear_empty_bed).pack(side=tk.LEFT, padx=4)
         self.status = tk.StringVar(value="Connecting to %s..." % worker.port_name)
         tk.Label(bar, textvariable=self.status, fg="#e0e0e0", bg="#202020",
-                 font=("TkDefaultFont", 11)).pack(side=tk.LEFT, padx=12)
+                 font=self.f_text).pack(side=tk.LEFT, padx=12)
+        tk.Label(bar, text="Ctrl + / Ctrl - : text size", fg="#8d8d8d", bg="#202020",
+                 font=self.f_small).pack(side=tk.RIGHT)
 
         body = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashwidth=6, bg="#202020")
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.cam = self._panel(body, "Camera")
         self.top = self._panel(body, "Top-down (mm, white-balanced)")
         info = tk.Frame(body, bg="#2a2a2a")
-        self.info = tk.Text(info, width=44, bg="#2a2a2a", fg="#e8e8e8", bd=0,
-                            highlightthickness=0, font=("TkFixedFont", 11), wrap=tk.WORD)
+        self.info = tk.Text(info, width=40, bg="#2a2a2a", fg="#e8e8e8", bd=0,
+                            highlightthickness=0, font=self.f_mono, wrap=tk.WORD,
+                            spacing1=2)
         self.info.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.info.tag_configure("head", font=("TkDefaultFont", 12, "bold"), foreground="#ffffff")
+        self.info.tag_configure("head", font=self.f_head, foreground="#ffffff", spacing1=10)
         self.info.tag_configure("good", foreground="#6fdc8c")
         self.info.tag_configure("mid", foreground="#f1c21b")
         self.info.tag_configure("bad", foreground="#ff8389")
         self.info.tag_configure("dim", foreground="#a0a0a0")
-        body.add(self.cam[0], stretch="always", minsize=300, width=720)
-        body.add(self.top[0], stretch="always", minsize=200, width=330)
-        body.add(info, minsize=300, width=330)
+        win_w = int(sw * 0.9)
+        body.add(self.cam[0], stretch="always", minsize=300, width=int(win_w * 0.46))
+        body.add(self.top[0], stretch="always", minsize=200, width=int(win_w * 0.24))
+        body.add(info, minsize=300, width=int(win_w * 0.30))
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<space>", lambda e: self.toggle_pause())
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            root.bind(seq, lambda e: self.zoom(+1))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            root.bind(seq, lambda e: self.zoom(-1))
+        root.bind("<Control-0>", lambda e: self.zoom(0))
         root.after(50, self.poll)
+
+    # -------------------------------------------------------------- fonts
+    def _setup_fonts(self, size):
+        """Every widget uses these named fonts, so zooming resizes them all.
+
+        Sizes are in points, which Tk scales by the display's DPI. (A Tk built
+        without Xft cannot scale fonts at all and shows tiny bitmap text; the
+        conda-forge tk needs its xft build.)
+        """
+        self.base_size = self.font_size = size or 11
+        sans = tkfont.nametofont("TkDefaultFont").actual("family")
+        mono = tkfont.nametofont("TkFixedFont").actual("family")
+        self.f_text = tkfont.Font(family=sans)
+        self.f_small = tkfont.Font(family=sans)
+        self.f_head = tkfont.Font(family=sans, weight="bold")
+        self.f_mono = tkfont.Font(family=mono)
+        self.zoom(0)
+
+    def zoom(self, step):
+        size = self.base_size if step == 0 else max(6, min(30, self.font_size + step))
+        self.font_size = size
+        for f, k in ((self.f_text, 1.0), (self.f_small, 0.85), (self.f_head, 1.15), (self.f_mono, 1.0)):
+            f.configure(size=max(6, round(size * k)))
+        for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+            tkfont.nametofont(name).configure(size=size)
+        ttk.Style().configure("TButton", font=self.f_text, padding=(4, 2))
 
     def _panel(self, parent, title):
         f = tk.Frame(parent, bg="#2a2a2a")
-        tk.Label(f, text=title, fg="#c6c6c6", bg="#2a2a2a", anchor="w").pack(side=tk.TOP, fill=tk.X,
-                                                                            padx=6, pady=(4, 0))
-        lbl = tk.Label(f, bg="#111111")
+        tk.Label(f, text=title, fg="#c6c6c6", bg="#2a2a2a", anchor="w",
+                 font=self.f_text).pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 0))
+        lbl = tk.Label(f, bg="#111111", font=self.f_text)
         lbl.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
         return f, lbl
 
@@ -200,7 +238,8 @@ class Viewer:
             return None
         view = res.rectified.copy()
         if res.lid is not None:
-            cv.polylines(view, [res.lid.box_px.astype("int32")], True, (0, 220, 0), 2)
+            colour = (0, 200, 255) if res.lid.length_is_min else (0, 220, 0)   # as in the photo
+            cv.polylines(view, [res.lid.box_px.astype("int32")], True, colour, 2)
         # 10 mm grid ticks along the edges, to read sizes by eye
         x0, y0, x1, y1 = res.region
         ppm = view.shape[1] / (x1 - x0)
@@ -226,7 +265,9 @@ class Viewer:
             t.insert(tk.END, "  none in view\n", "bad")
         t.insert(tk.END, "\nLid\n", "head")
         if res.lid is not None:
-            t.insert(tk.END, "  %.1f x %.1f mm\n" % res.lid.size_mm)
+            t.insert(tk.END, "  %s\n" % LidVision.describe_size(res.lid))
+            if res.lid.length_is_min:
+                t.insert(tk.END, "  runs off the view: length is a minimum\n", "mid")
             t.insert(tk.END, "  found by %s\n" % ("empty-bed difference" if res.lid.method == "background"
                                                    else "edges"), "dim")
         else:
@@ -336,6 +377,7 @@ def main():
     ap.add_argument("--out", default=os.path.expanduser("~/lidcam"),
                     help="folder for saved photos and the empty-bed reference")
     ap.add_argument("--marker-mm", type=float, default=LidVision.DEFAULT_MARKER_MM)
+    ap.add_argument("--font-size", type=int, default=11, help="text size in points (default 11)")
     ap.add_argument("--exit-after", type=float, help=argparse.SUPPRESS)   # for testing
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -343,7 +385,7 @@ def main():
     results = queue.Queue()
     worker = Worker(a.port or snap.find_port(), a.marker_mm, a.out, results)
     root = tk.Tk()
-    viewer = Viewer(root, worker, a.out, a.marker_mm)
+    viewer = Viewer(root, worker, a.out, a.marker_mm, a.font_size)
     worker.start()
     if a.exit_after:
         root.after(int(a.exit_after * 1000), lambda: (print("photos shown:", viewer.frames),

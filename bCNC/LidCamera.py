@@ -338,7 +338,7 @@ class Controller:
                              % (len(texts), ", ".join(texts[1:])))
             if res.lid is not None:
                 want = match.first.get("size")
-                lines.append(_("Measured %.1f x %.1f mm") % res.lid.size_mm
+                lines.append(_("Measured %s") % LidVision.describe_size(res.lid)
                              + ((_(", lid is %.1f x %.1f mm") % tuple(sorted(want))) if want else ""))
             if match.notes:
                 lines.append("; ".join(match.notes))
@@ -532,6 +532,10 @@ class Controller:
             def done(res):
                 if res.lid is None:
                     msg.set(_("No lid found: %s") % " ".join(res.warnings))
+                    return
+                if res.lid.length_is_min:
+                    msg.set(_("The lid runs off the edge of the camera's view, so its length "
+                              "cannot be measured. Calibrate with a lid that is fully in view."))
                     return
                 w_short, w_long = sorted(want)
                 m_short, m_long = res.lid.size_mm
