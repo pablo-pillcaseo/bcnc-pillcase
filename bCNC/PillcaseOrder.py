@@ -469,6 +469,37 @@ def lid_dimensions(cfg):
     return (width, length) if width > 0 and length > 0 else None
 
 
+# ----------------------------------------------------------- lid outlines
+# The physical outline of each lid, for the lid camera: what a photo of the lid
+# measures. Not the engraving frame above. For most lids they are the same, but
+# the Mission frames are shortened on purpose (44 x 50 on a 44.45 x 82.55 mm
+# lid), so a photo matched against the frame never fits. Generated from the CAD
+# templates by tools/extract_lid_outlines.py, keyed by product code.
+_LID_OUTLINES = None
+
+
+def _lid_outlines():
+    global _LID_OUTLINES
+    if _LID_OUTLINES is None:
+        import json
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lid_outlines.json")
+        try:
+            with open(path) as f:
+                _LID_OUTLINES = json.load(f).get("lids", {})
+        except (OSError, ValueError):
+            _LID_OUTLINES = {}
+    return _LID_OUTLINES
+
+
+def lid_outline(cfg):
+    """(width, length) in mm of the physical lid a configured lid is, or its
+    engraving frame when the outline table has no entry for its product."""
+    rec = _lid_outlines().get(configured_product_code(cfg))
+    if rec:
+        return (float(rec["width"]), float(rec["length"]))
+    return lid_dimensions(cfg)
+
+
 # ------------------------------------------------------- lids <-> products
 def configured_product_code(cfg):
     """The product code a lid is configured for, as configured.

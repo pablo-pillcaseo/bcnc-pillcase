@@ -185,7 +185,8 @@ class Controller:
             code = (row.get("colour_code") or "").upper()
             out.append({
                 "key": "%s|%s" % (lid or row.get("product_code") or "?", code),
-                "size": PillcaseOrder.lid_dimensions(gen._lid_defaults.get(lid)) if lid else None,
+                # The lid as it is, not its engraving frame (see lid_outline).
+                "size": PillcaseOrder.lid_outline(gen._lid_defaults.get(lid)) if lid else None,
                 "colour_key": code,
                 "row_index": i,
                 "lid": lid,
@@ -516,7 +517,7 @@ class Controller:
             gen = f._gen()
             if not hasattr(gen, "_lid_defaults"):
                 gen._lid_defaults = gen._load_lid_defaults()
-            want = PillcaseOrder.lid_dimensions(gen._lid_defaults.get(lid)) if lid else None
+            want = PillcaseOrder.lid_outline(gen._lid_defaults.get(lid)) if lid else None
             if not want:
                 msg.set(_("Select a lid in the tote list, with its size configured, and "
                           "place that lid in the fixture first."))

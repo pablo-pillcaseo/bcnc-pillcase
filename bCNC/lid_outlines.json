@@ -1,0 +1,65 @@
+{
+  "about": "Physical lid outlines (short side x long side, mm) for the lid camera, from the OUTLINE of each *_Lid drawing in Pill Case Templates.zip. Not engraving frames: see lid_dimensions.json for those. Regenerate with tools/extract_lid_outlines.py.",
+  "lids": {
+    "MPC": {
+      "name": "Mission Pill Case",
+      "width": 44.45,
+      "length": 82.55,
+      "template": "SD3ULS-Mission-Pill/SD3ULS-Mission-Pill_Lid.svg"
+    },
+    "MVC": {
+      "name": "Mission Vitamin Case",
+      "width": 53.34,
+      "length": 95.12,
+      "template": "SD3ULSM-Mission-Vitamin/SD3ULSM-Mission-Vitamin_Lid.svg"
+    },
+    "AMPM-VC": {
+      "name": "Weekly AM-PM Vitamin Case",
+      "width": 40.51,
+      "length": 220.98,
+      "template": "SD7-MAG-Weekly-AMPM-Vitamin/SD7-MAG-Weekly-AMPM-Vitamin_Lid.svg"
+    },
+    "AMPM-PC": {
+      "name": "Weekly AM-PM Pill Case",
+      "width": 33.53,
+      "length": 183.39,
+      "template": "SD7-MAGS-Weekly-AMPM-Pill/SD7-MAGS-Weekly-AMPM-Pill_Lid.svg"
+    },
+    "WPC": {
+      "name": "Weekly Pill Case",
+      "width": 44.45,
+      "length": 184.15,
+      "template": "SD7UL-Weekly-Pill/SD7UL-Weekly-Pill_Lid.svg"
+    },
+    "WVC": {
+      "name": "Weekly Vitamin Case",
+      "width": 53.34,
+      "length": 220.98,
+      "template": "SD7ULM-Weekly-Vitamin/SD7ULM-Weekly-Vitamin_Lid.svg"
+    },
+    "WVXC": {
+      "name": "Weekly Vitamin XL Case",
+      "width": 53.34,
+      "length": 220.98,
+      "template": "SD7ULM-XL-Weekly-Vitamin-XL/SD7ULM-XL-Weekly-Vitamin-XL_Lid.svg"
+    },
+    "WXSPC": {
+      "name": "Weekly XS Pill Case",
+      "width": 36.58,
+      "length": 151.13,
+      "template": "SD7ULS-Weekly-XS/SD7ULS-Weekly-XS_Lid.svg"
+    },
+    "AMPM-VXL": {
+      "name": "Weekly AM-PM Vitamin XL Case",
+      "width": 46.99,
+      "length": 220.98,
+      "template": "WAPVXL-Weekly-AMPM-XL/WAPVXL-Weekly-AMPM-XL_Lid.svg"
+    },
+    "WV2XC": {
+      "name": "Weekly 2XL Case",
+      "width": 62.23,
+      "length": 249.17,
+      "template": "WV2XL-Weekly-Vitamin-2XL/WV2XL-Weekly-Vitamin-2XL_Lid.svg"
+    }
+  }
+}

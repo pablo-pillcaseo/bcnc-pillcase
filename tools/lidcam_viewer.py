@@ -9,7 +9,7 @@ second):
     likeliest case named in large type next to it - no label when nothing on
     the list matches
   * markers seen, the lid's measured size and colour, warnings, and the best
-    matches among every configured lid in every thumbnail colour
+    matches among every lid (physical outline) in every thumbnail colour
 
 For aiming the camera, placing the markers and checking the measurements, with
 no mill or ShipHero order needed. It holds the probe's serial port, so close

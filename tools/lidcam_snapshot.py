@@ -2,7 +2,7 @@
 """Take one photo with the lid camera and run the lid vision on it, no mill or
 ShipHero needed.
 
-Every configured lid (bCNC/lid_dimensions.json) in every thumbnail colour is a
+Every lid (its physical outline, bCNC/lid_outlines.json) in every thumbnail colour is a
 candidate, so this answers "what does the camera think is on the bed" and
 shows what it measured. Close bCNC first, or at least its BLTouch port.
 
@@ -31,7 +31,7 @@ import BltCamera  # noqa: E402
 import LidVision  # noqa: E402
 
 THUMBS = os.path.join(HERE, "..", "bCNC", "color_thumbnails")
-LIDS = os.path.join(HERE, "..", "bCNC", "lid_dimensions.json")
+OUTLINES = os.path.join(HERE, "..", "bCNC", "lid_outlines.json")
 
 
 def find_port():
@@ -60,13 +60,14 @@ def take_photo(port_name):
 
 
 def candidates():
-    lids = json.load(open(LIDS))["defaults"]
+    # Physical lid outlines, not engraving frames: the camera sees the lid.
+    lids = json.load(open(OUTLINES))["lids"]
     colours = sorted(os.path.splitext(f)[0] for f in os.listdir(THUMBS) if f.endswith(".png"))
     out = []
-    for name, d in lids.items():
+    for d in lids.values():
         for c in colours:
-            out.append({"key": name + "|" + c, "size": (d["width"], d["length"]),
-                        "colour_key": c, "lid": name})
+            out.append({"key": d["name"] + "|" + c, "size": (d["width"], d["length"]),
+                        "colour_key": c, "lid": d["name"]})
     return out
 
 
