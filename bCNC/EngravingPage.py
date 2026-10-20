@@ -399,8 +399,10 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self._gen().fetchShipHeroOrder(self.scan_entry.get())
         return "break"
 
-    def load_order(self, scan_value, search_mode, rows):
-        """Show a looked-up tote/order, ready to pick a lid."""
+    def load_order(self, scan_value, search_mode, rows, identify=True):
+        """Show a looked-up tote/order, ready to pick a lid. `identify`: let
+        the lid camera look at the bed (not when the camera itself loads an
+        order to select one of its lids)."""
         self.scan_value = str(scan_value or "").strip()
         self.search_mode = search_mode
         self.tote_key = ES.scan_key(search_mode, self.scan_value)
@@ -415,7 +417,9 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self._refresh_tree()
         self._show()
         self._select_next()
-        self.lidcam.after_scan()
+        self.lidcam.note_order()
+        if identify:
+            self.lidcam.after_scan()
 
     # ================================================================ list
     def _completed(self):
@@ -599,6 +603,9 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._warn(_("This case type is not mapped to any Lid. Pick one from the Lid dropdown."))
             return False
         key = self.row_keys[i]
+        # A photo just taken and not confirmed showed this lid: it teaches the
+        # camera even when the lid was picked here by hand.
+        self.lidcam.note_engraving(i)
         if key in self._completed() and not messagebox.askyesno(
                 _("Already Engraved"),
                 _("This lid is already marked as engraved.\n\nEngrave it again?"), parent=self):

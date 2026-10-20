@@ -108,6 +108,7 @@ class Sender:
         # two never read each other's replies off the shared port.
         self.blt_lock = threading.RLock()
         self.blt_has_camera = None     # None until asked, then True/False
+        self.blt_camera_version = 0     # the camera firmware's version, once asked
 
         self._posUpdate = False  # Update position
         self._probeUpdate = False  # Update probe
@@ -580,6 +581,7 @@ class Sender:
                 pass
             self.blt_serial = None
             self.blt_has_camera = None
+            self.blt_camera_version = 0
         CNC.vars["blt_state"] = NOT_CONNECTED
 
     def blt_serial_send(self, cmd):
@@ -626,6 +628,7 @@ class Sender:
             if first:
                 port.reset_input_buffer()
                 version, self.blt_has_camera = BltCamera.identify_version(port)
+                self.blt_camera_version = version
                 if self.blt_has_camera:
                     # The exposure calibration (tools/lidcam_viewer.py), if
                     # one was saved: every photo taken the same way.
@@ -645,6 +648,28 @@ class Sender:
         for line in shot.other_lines:
             print(f"[INFO] BLTouch during capture: {line}")
         return shot
+
+    def blt_camera_exposure(self, aec=None, agc=0, wb=0):
+        """Fix the lid camera's exposure (`aec` None: automatic again), for the
+        exposure calibration. Takes effect from the next capture. Raises
+        BltCamera.CameraError when the firmware cannot."""
+        import BltCamera
+
+        with self.blt_lock:
+            port = self.blt_serial
+            if port is None:
+                raise BltCamera.CameraError("the BLTouch port is not connected")
+            if self.blt_has_camera is None:
+                port.reset_input_buffer()
+                self.blt_camera_version, self.blt_has_camera = BltCamera.identify_version(port)
+            if self.blt_camera_version < BltCamera.EXPOSURE_VERSION:
+                raise BltCamera.CameraError(
+                    "the camera firmware cannot fix its exposure (flash firmware/bltouch_camera)")
+            port.reset_input_buffer()
+            if aec is None:
+                BltCamera.set_auto_exposure(port)
+            else:
+                BltCamera.set_exposure(port, aec, agc, wb)
 
     # ----------------------------------------------------------------------
     # Send to controller a gcode or command
