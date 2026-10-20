@@ -88,15 +88,9 @@ class Worker(threading.Thread):
         return self._refs[key]
 
     def _load_background(self):
-        """The empty-bed photo and the fixture corner, as saved in out_dir."""
+        """The empty-bed map and the fixture corner, as saved in out_dir."""
         self.corner = load_corner(self.out_dir)
-        base = os.path.join(self.out_dir, "empty-bed")
-        self.background = None
-        if os.path.exists(base + ".json"):
-            bg = json.load(open(base + ".json"))
-            bg["image"] = cv.imread(base + ".png")
-            if bg["image"] is not None:
-                self.background = bg
+        self.background = load_bed(self.out_dir)
 
     def _open(self):
         port = serial.Serial(self.port_name, 9600, timeout=0.05)
@@ -519,15 +513,32 @@ class Viewer:
         if not messagebox.askyesno("Save Empty Bed", question, parent=self.root,
                                    icon="warning" if found is not None else "question"):
             return False
-        rec = LidVision.background_record(fresh, self.marker_mm)
-        if rec is None:
+        if fresh.plane is None:
             self.status.set("Empty bed not saved: no markers in view.")
             return False
-        base = os.path.join(self.out_dir, "empty-bed")
-        cv.imwrite(base + ".png", rec["image"])
-        json.dump({k: v for k, v in rec.items() if k != "image"}, open(base + ".json", "w"))
-        self.worker.reload_background.set()
-        self.status.set("Empty bed saved: the lid is now whatever differs from it.")
+        # Added to the map: this view replaces what the map had for the ground
+        # it shows, and the rest of the map stays.
+        old = self.worker.background
+        if old is not None and old.ref == fresh.plane.ref and old.marker_mm == self.marker_mm:
+            bed = old.copy()
+            bed.add(fresh.rectified, fresh.valid, fresh.region, fresh.ppm, replace=True)
+        else:
+            bed = LidVision.BedMap.from_result(fresh, self.marker_mm)
+        bed.save(bed_base(self.out_dir))
+        self.worker.background = bed            # swapped whole: the worker never sees half
+        self.status.set("Empty bed saved to the map: the lid is whatever differs from it.")
+        return True
+
+    def learn_bed(self, res):
+        """A confirmed lid: the bare fixture around it updates the map."""
+        old = self.worker.background
+        if old is None or res is None:
+            return False
+        bed = old.copy()
+        if not bed.learn(res):
+            return False
+        bed.save(bed_base(self.out_dir))
+        self.worker.background = bed
         return True
 
     def set_lid_corner(self):
@@ -557,9 +568,12 @@ class Viewer:
         return True
 
     def clear_empty_bed(self):
-        for ext in (".png", ".json"):
+        base = bed_base(self.out_dir)
+        for path in (base + ".png", base + "-count.png", base + ".json",
+                     os.path.join(self.out_dir, "empty-bed.png"),
+                     os.path.join(self.out_dir, "empty-bed.json")):
             try:
-                os.remove(os.path.join(self.out_dir, "empty-bed" + ext))
+                os.remove(path)
             except OSError:
                 pass
         self.worker.reload_background.set()
@@ -585,6 +599,16 @@ class Viewer:
         cal = getattr(self, "calibration", None)
         if cal is not None:
             cal.handle(item)
+
+
+def bed_base(out_dir):
+    """Where the empty-bed map is kept: <out>/empty-bed-map.png, -count.png, .json."""
+    return os.path.join(out_dir, "empty-bed-map")
+
+
+def load_bed(out_dir):
+    """The empty-bed map, or one made from an older single empty-bed photo."""
+    return LidVision.load_bed(bed_base(out_dir), os.path.join(out_dir, "empty-bed"))
 
 
 def corner_path(out_dir):

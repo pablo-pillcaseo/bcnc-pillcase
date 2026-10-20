@@ -572,6 +572,9 @@ class Learner(viewer.Viewer):
             return
         if size not in self.size_names:
             self._fill_sizes()
+        # The bare fixture around a confirmed lid keeps the empty-bed map current.
+        if not self.file_mode and res.lid is not None:
+            self.learn_bed(res)
         g = f["guesses"]
         right = [METHOD_NAMES[m] for m in LidLearn.COLOUR_METHODS
                  if g.get(m) and g[m][0] == colour]
@@ -863,14 +866,9 @@ def report(store, outlines):
 
 def remeasure(store, out_dir, marker_mm, log=print):
     """Outline, size and crop of every named lid again, from its photo."""
-    bg = None
-    base = os.path.join(out_dir, "empty-bed")
-    if os.path.exists(base + ".json"):
-        with open(base + ".json") as f:
-            bg = json.load(f)
-        bg["image"] = cv.imread(base + ".png")
-    log("empty-bed photo: %s" % ("%s.png" % base if bg is not None and bg["image"] is not None
-                                 else "none (lids found by their edges)"))
+    bg = viewer.load_bed(out_dir)
+    log("empty-bed map: %s" % ("%d%% of its area known" % round(100 * (bg.count > 0).mean())
+                               if bg is not None else "none (lids found by their edges)"))
     corner = viewer.load_corner(out_dir)
     log("fixture corner: %s" % ("set" if corner is not None else "none"))
     outlines = LidLearn.load_outlines(snap.OUTLINES)

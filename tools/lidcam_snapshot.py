@@ -102,10 +102,10 @@ def main():
 
     bg = None
     bg_base = a.background or os.path.join(a.out, "empty-bed")
-    if not a.empty_bed and os.path.exists(bg_base + ".json"):
-        bg = json.load(open(bg_base + ".json"))
-        bg["image"] = cv.imread(bg_base + ".png")
-        print("using empty-bed photo", bg_base + ".png")
+    if not a.empty_bed:
+        bg = LidVision.load_bed(bg_base + "-map", bg_base)
+        if bg is not None:
+            print("using the empty-bed map", bg_base + "-map.png")
 
     res = LidVision.identify(jpeg, [] if a.empty_bed else candidates(), ref, a.marker_mm,
                              background=bg)
@@ -120,12 +120,16 @@ def main():
         print("warning:", w)
 
     if a.empty_bed:
-        rec = LidVision.background_record(res, a.marker_mm)
-        if rec is None:
+        old = LidVision.load_bed(bg_base + "-map", bg_base)
+        if res.plane is None:
             raise SystemExit("No markers in view: nothing saved.")
-        cv.imwrite(bg_base + ".png", rec["image"])
-        json.dump({k: v for k, v in rec.items() if k != "image"}, open(bg_base + ".json", "w"))
-        print("saved", bg_base + ".png")
+        if old is not None and old.ref == res.plane.ref:
+            old.add(res.rectified, res.valid, res.region, res.ppm, replace=True)
+            bed = old
+        else:
+            bed = LidVision.BedMap.from_result(res, a.marker_mm)
+        bed.save(bg_base + "-map")
+        print("saved to the empty-bed map", bg_base + "-map.png")
         return
 
     if res.lid:
