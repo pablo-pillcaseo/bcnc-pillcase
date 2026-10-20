@@ -47,8 +47,12 @@ def take_photo(port_name):
     try:
         time.sleep(0.3)
         port.reset_input_buffer()
-        if not BltCamera.identify(port, 2.0):
+        version, has_camera = BltCamera.identify_version(port, 2.0)
+        if not has_camera:
             raise SystemExit("The board did not answer as camera firmware (BLTCAM).")
+        rec = BltCamera.apply_saved_exposure(port, version, BltCamera.default_exposure_path())
+        if rec:
+            print("exposure fixed: aec=%s agc=%s wb=%s" % (rec["aec"], rec["agc"], rec["wb"]))
         port.reset_input_buffer()
         t = time.time()
         shot = BltCamera.capture(port, first=True)

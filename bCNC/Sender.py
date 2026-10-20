@@ -625,7 +625,18 @@ class Sender:
             first = self.blt_has_camera is None
             if first:
                 port.reset_input_buffer()
-                self.blt_has_camera = BltCamera.identify(port)
+                version, self.blt_has_camera = BltCamera.identify_version(port)
+                if self.blt_has_camera:
+                    # The exposure calibration (tools/lidcam_viewer.py), if
+                    # one was saved: every photo taken the same way.
+                    try:
+                        rec = BltCamera.apply_saved_exposure(
+                            port, version, Utils.iniUser + BltCamera.EXPOSURE_FILE_SUFFIX)
+                        if rec:
+                            print("[INFO] Lid camera exposure fixed: aec=%s agc=%s wb=%s"
+                                  % (rec["aec"], rec["agc"], rec["wb"]))
+                    except BltCamera.CameraError as e:
+                        print(f"[WARN] Lid camera exposure not set: {e}")
             if not self.blt_has_camera:
                 raise BltCamera.CameraError(
                     "the BLTouch board has no camera firmware (flash firmware/bltouch_camera)")

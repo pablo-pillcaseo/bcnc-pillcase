@@ -21,6 +21,17 @@ bCNC (or its BLTouch port) first.
 Save Photo writes the current photo to --out. Save Empty Bed keeps the current
 view as the empty-bed reference (same files as lidcam_snapshot.py uses), after
 which the lid is found as whatever differs from it.
+
+Set Lid Corner records where lids sit: pushed into the fixture's corner, every
+lid's upper-left corner in one place. Place a lid that outlines well (a light
+colour) in the corner and press it; afterwards a lid in the corner is anchored
+there, and only its far side and far end are measured. Saved in --out.
+
+Calibrate Exposure fixes the camera's exposure for every lid (bCNC/LidExposure):
+place the brightest lid (Aluminum), measure, swap in the darkest (Matte Black)
+at the same spot, measure, save. It is saved per machine, where bCNC reads it
+too (~/.bCNC-lidcam-exposure.json), and applied whenever the camera connects.
+Needs camera firmware 2 (firmware/bltouch_camera).
 """
 
 import argparse
@@ -32,7 +43,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "bCNC"))
@@ -42,6 +53,7 @@ import serial  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 import BltCamera  # noqa: E402
+import LidExposure  # noqa: E402
 import LidVision  # noqa: E402
 import lidcam_snapshot as snap  # noqa: E402
 
@@ -61,7 +73,14 @@ class Worker(threading.Thread):
         self.candidates = snap.candidates()
         self._refs = {}
         self.background = None
+        self.corner = None              # LidCorner, or None
         self.reload_background.set()
+        # Work that needs the port to itself (exposure calibration), run
+        # between photos: callables taking the port.
+        self.jobs = queue.Queue()
+        self.version = 0
+        self.exposure_path = BltCamera.default_exposure_path()
+        self.exposure = None        # the fixed exposure in use, or None: automatic
 
     def ref(self, key):
         if key not in self._refs:
@@ -69,6 +88,8 @@ class Worker(threading.Thread):
         return self._refs[key]
 
     def _load_background(self):
+        """The empty-bed photo and the fixture corner, as saved in out_dir."""
+        self.corner = load_corner(self.out_dir)
         base = os.path.join(self.out_dir, "empty-bed")
         self.background = None
         if os.path.exists(base + ".json"):
@@ -81,16 +102,31 @@ class Worker(threading.Thread):
         port = serial.Serial(self.port_name, 9600, timeout=0.05)
         time.sleep(0.3)
         port.reset_input_buffer()
-        if not BltCamera.identify(port, 2.0):
+        self.version, has_camera = BltCamera.identify_version(port, 2.0)
+        if not has_camera:
             port.close()
             raise BltCamera.CameraError("the board did not answer as camera firmware")
+        self.exposure = BltCamera.apply_saved_exposure(port, self.version, self.exposure_path)
         return port
+
+    def _run_job(self, port):
+        """Run one queued job with the port, if any. Its result (or error)
+        goes to the results queue as ("job", name, value, error)."""
+        try:
+            name, fn = self.jobs.get_nowait()
+        except queue.Empty:
+            return False
+        try:
+            self.results.put(("job", name, fn(port), None))
+        except Exception as e:          # reported to the dialog, never raised
+            self.results.put(("job", name, None, e))
+        return True
 
     def run(self):
         port = None
         first = True
         while not self.stopped.is_set():
-            if self.paused.is_set():
+            if self.paused.is_set() and self.jobs.empty():
                 time.sleep(0.1)
                 continue
             try:
@@ -100,13 +136,17 @@ class Worker(threading.Thread):
                 if self.reload_background.is_set():
                     self.reload_background.clear()
                     self._load_background()
+                if self._run_job(port):
+                    continue
+                if self.paused.is_set():
+                    continue
                 port.reset_input_buffer()
                 t0 = time.time()
                 shot = BltCamera.capture(port, first=first)
                 first = False
                 t1 = time.time()
                 res = LidVision.identify(shot.jpeg, self.candidates, self.ref, self.marker_mm,
-                                         background=self.background)
+                                         background=self.background, corner=self.corner)
                 t2 = time.time()
                 self.results.put(("frame", shot, res, t1 - t0, t2 - t1))
             except BltCamera.CameraError as e:
@@ -147,8 +187,10 @@ class Viewer:
         self.pause_btn = ttk.Button(bar, text="Pause", command=self.toggle_pause)
         self.pause_btn.pack(side=tk.LEFT)
         ttk.Button(bar, text="Save Photo", command=self.save_photo).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bar, text="Save Empty Bed", command=self.save_empty_bed).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="Save Empty Bed (no lid)", command=self.save_empty_bed).pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="Clear Empty Bed", command=self.clear_empty_bed).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="Set Lid Corner", command=self.set_lid_corner).pack(side=tk.LEFT, padx=(16, 4))
+        ttk.Button(bar, text="Calibrate Exposure", command=self.calibrate_exposure).pack(side=tk.LEFT, padx=(16, 4))
         self.status = tk.StringVar(value="Connecting to %s..." % worker.port_name)
         tk.Label(bar, textvariable=self.status, fg="#e0e0e0", bg="#202020",
                  font=self.f_text).pack(side=tk.LEFT, padx=12)
@@ -406,13 +448,18 @@ class Viewer:
         bg = "on" if self.worker.background is not None else "off"
         t.insert(tk.END, "\nPhoto %dx%d, %d kB · capture %.2fs · vision %.2fs · empty bed %s\n"
                  % (shot.width, shot.height, len(shot.jpeg) // 1024, t_cap, t_vis, bg), "dim")
+        t.insert(tk.END, "Exposure: %s\n" % exposure_text(self.worker), "dim")
 
     # --------------------------------------------------------------- loop
     def poll(self):
         latest = None
         try:
             while True:
-                latest = self.results.get_nowait()
+                item = self.results.get_nowait()
+                if item[0] in ("job", "log"):
+                    self._job_item(item)
+                    continue
+                latest = item
                 if latest[0] == "error":
                     self.status.set("Camera: %s" % latest[1])
         except queue.Empty:
@@ -450,17 +497,64 @@ class Viewer:
         self.status.set("Saved %s" % os.path.join(self.out_dir, name + ".jpg"))
 
     def save_empty_bed(self):
+        """Keep the current view as the empty bed. True when saved."""
         if not self.last:
-            return
-        rec = LidVision.background_record(self.last[1], self.marker_mm)
+            return False
+        # A lid left on the bed becomes part of "empty", and every lid after is
+        # then measured against it. Look for one first (by its edges: the
+        # empty-bed comparison cannot see a lid that is in both photos). A dark
+        # lid on the black fixture can still slip through, hence the reminder.
+        # The photo is analysed afresh, without the old empty bed: the live
+        # view's result is framed by the old empty bed's area, and a new one
+        # saved from it would inherit that framing even after the camera moved.
+        fresh = LidVision.identify(self.last[0].jpeg, snap.candidates(), lambda key: None,
+                                   self.marker_mm)
+        found = fresh.lid
+        question = ("Save the empty-bed photo?\n\nIt must show the bed with NO lid on it: "
+                    "every lid afterwards is found by how it differs from this photo.")
+        if found is not None:
+            question = ("There seems to be a lid on the bed (%s).\n\nAn empty-bed photo must "
+                        "show the bed with no lid on it. Save it anyway?"
+                        % LidVision.describe_size(found))
+        if not messagebox.askyesno("Save Empty Bed", question, parent=self.root,
+                                   icon="warning" if found is not None else "question"):
+            return False
+        rec = LidVision.background_record(fresh, self.marker_mm)
         if rec is None:
             self.status.set("Empty bed not saved: no markers in view.")
-            return
+            return False
         base = os.path.join(self.out_dir, "empty-bed")
         cv.imwrite(base + ".png", rec["image"])
         json.dump({k: v for k, v in rec.items() if k != "image"}, open(base + ".json", "w"))
         self.worker.reload_background.set()
         self.status.set("Empty bed saved: the lid is now whatever differs from it.")
+        return True
+
+    def set_lid_corner(self):
+        """Record the fixture's corner from the lid on the bed. True when saved."""
+        if not self.last:
+            return False
+        # Found afresh, not anchored on the corner already saved.
+        res = LidVision.identify(self.last[0].jpeg, snap.candidates(), lambda key: None,
+                                 self.marker_mm, background=self.worker.background)
+        corner = LidVision.corner_from_result(res)
+        if corner is None or res.lid.length_is_min:
+            messagebox.showinfo("Set Lid Corner", "Place a lid in the fixture's corner, fully "
+                                "in view, so its outline is found all round. A light-coloured "
+                                "lid works best.", parent=self.root)
+            return False
+        if not messagebox.askyesno(
+                "Set Lid Corner",
+                "Use this lid (%s) to set where lids sit?\n\nIt must be pushed into the "
+                "fixture's corner the way every lid is, and its green outline must follow the "
+                "lid exactly, at the corner most of all. Lids in that corner are then anchored "
+                "on it." % LidVision.describe_size(res.lid), parent=self.root):
+            return False
+        with open(corner_path(self.out_dir), "w") as f:
+            json.dump(corner.to_dict(), f, indent=1)
+        self.worker.reload_background.set()
+        self.status.set("Lid corner saved: lids in the fixture's corner are anchored on it.")
+        return True
 
     def clear_empty_bed(self):
         for ext in (".png", ".json"):
@@ -474,6 +568,190 @@ class Viewer:
     def close(self):
         self.worker.stopped.set()
         self.root.after(300, self.root.destroy)
+
+    # ------------------------------------------------------- calibration
+    def calibrate_exposure(self):
+        if getattr(self, "calibration", None) is not None:
+            self.calibration.top.lift()
+            return
+        if self.worker.version and self.worker.version < BltCamera.EXPOSURE_VERSION:
+            messagebox.showinfo("Calibrate Exposure", "The camera firmware cannot fix its "
+                                "exposure. Flash firmware/bltouch_camera (version 2) first.",
+                                parent=self.root)
+            return
+        self.calibration = ExposureCalibration(self)
+
+    def _job_item(self, item):
+        cal = getattr(self, "calibration", None)
+        if cal is not None:
+            cal.handle(item)
+
+
+def corner_path(out_dir):
+    return os.path.join(out_dir, "lid-corner.json")
+
+
+def load_corner(out_dir):
+    """The saved fixture corner (LidVision.LidCorner), or None."""
+    try:
+        with open(corner_path(out_dir)) as f:
+            return LidVision.LidCorner.from_dict(json.load(f))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def exposure_text(worker):
+    rec = worker.exposure
+    if rec is None:
+        return "automatic" if worker.version >= BltCamera.EXPOSURE_VERSION \
+            else "automatic (firmware cannot fix it)"
+    return "fixed, exposure %s, gain %s, %s white balance" % (
+        rec["aec"], rec["agc"], BltCamera.WB_PRESETS.get(rec["wb"], rec["wb"]))
+
+
+class ExposureCalibration:
+    """The two-lid exposure calibration, as a small window over the viewer.
+    The measuring runs on the camera worker (it owns the port); this only
+    asks for it and shows what comes back."""
+
+    def __init__(self, app):
+        self.app = app
+        self.worker = app.worker
+        self.was_paused = self.worker.paused.is_set()
+        self.worker.paused.set()            # no live photos in between
+        self.settings = self.area = self.bright = self.dark = self.verdict = None
+        self.saved_ok = False
+        top = self.top = tk.Toplevel(app.root)
+        top.title("Calibrate Exposure")
+        top.configure(bg="#2a2a2a")
+        top.transient(app.root)
+        top.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.prompt = tk.StringVar()
+        prompt = tk.Label(top, textvariable=self.prompt, fg="#ffffff", bg="#2a2a2a", font=app.f_head,
+                          justify=tk.LEFT, anchor="w", wraplength=560)
+        prompt.pack(fill=tk.X, padx=12, pady=(12, 6))
+        # Wrap at the window's width, whatever the text size.
+        prompt.bind("<Configure>", lambda e: prompt.config(wraplength=max(200, e.width - 8)))
+        self.log = tk.Text(top, width=72, height=16, bg="#1e1e1e", fg="#e8e8e8", bd=0,
+                           highlightthickness=0, font=app.f_mono, wrap=tk.WORD)
+        self.log.pack(fill=tk.BOTH, expand=True, padx=12)
+        self.log.tag_configure("good", foreground="#6fdc8c")
+        self.log.tag_configure("bad", foreground="#ff8389")
+        buttons = tk.Frame(top, bg="#2a2a2a")
+        buttons.pack(fill=tk.X, padx=12, pady=12)
+        self.go = ttk.Button(buttons, command=self.step)
+        self.go.pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Cancel", command=self.cancel).pack(side=tk.RIGHT, padx=8)
+        self.stage = "bright"
+        self._show_stage()
+
+    def _show_stage(self):
+        texts = {
+            "bright": ("Place the BRIGHTEST lid (Aluminum) where lids go, fully in view, "
+                       "then press Measure. About 15 seconds.", "Measure"),
+            "dark": ("Now swap in the DARKEST lid (Matte Black) at the same spot, the same "
+                     "way round, then press Measure.", "Measure"),
+            "done": ("Save these settings? The camera will use them for every photo, here "
+                     "and in bCNC.", "Save"),
+            "busy": ("Measuring... keep the lid still.", "Measure"),
+        }
+        prompt, button = texts[self.stage]
+        self.prompt.set(prompt)
+        self.go.config(text=button)
+        self.go.state(["disabled"] if self.stage == "busy" else ["!disabled"])
+
+    def write(self, text, tag=None):
+        self.log.insert(tk.END, text + "\n", tag)
+        self.log.see(tk.END)
+
+    def _take(self, port):
+        """take(aec, agc, wb) -> JPEG, on the worker's thread."""
+        def take(aec, agc, wb):
+            BltCamera.set_exposure(port, aec, agc, wb)
+            port.reset_input_buffer()
+            return BltCamera.capture(port, first=True).jpeg
+        return take
+
+    def _log_to_queue(self, text):
+        self.worker.results.put(("log", text))
+
+    def step(self):
+        stage = self.stage
+        if stage == "bright":
+            self.stage = "busy"
+            self._show_stage()
+            cands = snap.candidates()
+            mm = self.app.marker_mm
+            self.worker.jobs.put(("bright", lambda port: LidExposure.calibrate_bright(
+                self._take(port), cands, mm, None, log=self._log_to_queue)))
+        elif stage == "dark":
+            self.stage = "busy"
+            self._show_stage()
+            settings, area, bright = self.settings, self.area, self.bright
+            self.worker.jobs.put(("dark", lambda port: LidExposure.check_dark(
+                self._take(port), settings, area, bright, log=self._log_to_queue)))
+        elif stage == "done":
+            rec = LidExposure.record(self.settings, self.bright, self.dark, self.verdict)
+            BltCamera.save_exposure(self.worker.exposure_path, rec)
+
+            def apply(port, rec=rec):
+                BltCamera.set_exposure(port, rec["aec"], rec["agc"], rec["wb"])
+                self.worker.exposure = rec
+            self.worker.jobs.put(("apply", apply))
+            self.saved_ok = True
+            self.app.status.set("Exposure saved: %s" % self.worker.exposure_path)
+            messagebox.showinfo(
+                "Exposure saved",
+                "Saved to %s.\n\nIf an empty-bed photo is in use, save it again: it was "
+                "taken with the old exposure, and the lid is found by comparing with it."
+                % self.worker.exposure_path, parent=self.top)
+            self._close()
+
+    def handle(self, item):
+        if item[0] == "log":
+            self.write(item[1])
+            return
+        _kind, name, value, error = item
+        if name == "restore":
+            return
+        if error is not None:
+            self.write("Stopped: %s" % error, "bad")
+            self.stage = "bright" if name == "bright" else "dark" if name == "dark" else self.stage
+            self._show_stage()
+            return
+        if name == "bright":
+            self.settings, self.area, self.bright = value
+            self.write("Bright lid: exposure %d, gain 0, %s white balance. Its brightest %.0f "
+                       "of 255, marker borders %s." % (
+                           self.settings["aec"], BltCamera.WB_PRESETS[self.settings["wb"]],
+                           self.bright["lid_hi"],
+                           "not seen" if self.bright["border_hi"] is None
+                           else "%.0f" % self.bright["border_hi"]), "good")
+            self.stage = "dark"
+        elif name == "dark":
+            self.dark, self.verdict, ok = value
+            self.write(self.verdict, "good" if ok else "bad")
+            self.stage = "done" if ok else "dark"
+        self._show_stage()
+
+    def cancel(self):
+        if not self.saved_ok:
+            prev = BltCamera.load_exposure(self.worker.exposure_path)
+
+            def restore(port, prev=prev):
+                if prev:
+                    BltCamera.set_exposure(port, prev["aec"], prev["agc"], prev["wb"])
+                elif self.worker.version >= BltCamera.EXPOSURE_VERSION:
+                    BltCamera.set_auto_exposure(port)
+                self.worker.exposure = prev
+            self.worker.jobs.put(("restore", restore))
+        self._close()
+
+    def _close(self):
+        if not self.was_paused:
+            self.worker.paused.clear()
+        self.app.calibration = None
+        self.top.destroy()
 
 
 def main():

@@ -19,6 +19,8 @@ Per-machine files, next to the bCNC ini:
   <ini>-lidcam-last.jpg          the last photo, for checking what the camera sees
   <ini>-lidcam-background.png/.json   the empty-bed photo, if one was saved
   <ini>-lidcam-colours.json      colours learned from confirmed lids
+  <ini>-lidcam-exposure.json     the fixed exposure from Calibrate Exposure in
+                                 tools/lidcam_viewer.py (Sender applies it)
 """
 
 import json

@@ -27,10 +27,18 @@ Ordinary text lines ("Touch", a servo reply) can arrive between chunks. They
 are whole lines and are passed back to the caller rather than dropped, so the
 serial log stays complete.
 
+Exposure. Firmware 2 and later can fix exposure, gain and white balance
+('E' + six letters), so every photo is taken the same way and a lid's
+brightness depends only on the lid; 'A' goes back to automatic. The values come
+from the exposure calibration (LidExposure) and are kept per machine in a small
+JSON file (`load_exposure` / `save_exposure`).
+
 Pure Python over anything with read/readline/write/reset_input_buffer, so the
 parser is tested without hardware.
 """
 
+import json
+import os
 import re
 import time
 import zlib
@@ -98,19 +106,111 @@ class _Reader:
         return out
 
 
-def identify(port, timeout_s=IDENTIFY_TIMEOUT_S):
-    """True when the board runs the camera firmware and has a working camera,
-    False when it runs the old probe-only firmware (which ignores 'I')."""
+def identify_version(port, timeout_s=IDENTIFY_TIMEOUT_S):
+    """(firmware version, has a working camera). (0, False) for the old
+    probe-only firmware, which ignores 'I'."""
     port.write(IDENTIFY)
     deadline = time.time() + timeout_s
     reader = _Reader(port)
     try:
         while True:
             line = reader.readline(deadline)
-            if line.startswith(IDENTIFY_REPLY):
-                return line.split()[-1] == "camera"
+            if line.startswith(IDENTIFY_REPLY + " "):
+                parts = line.split()
+                try:
+                    version = int(parts[1])
+                except (IndexError, ValueError):
+                    version = 1
+                return version, parts[-1] == "camera"
     except CameraError:
-        return False
+        return 0, False
+
+
+def identify(port, timeout_s=IDENTIFY_TIMEOUT_S):
+    """True when the board runs the camera firmware and has a working camera,
+    False when it runs the old probe-only firmware (which ignores 'I')."""
+    return identify_version(port, timeout_s)[1]
+
+
+# ------------------------------------------------------------------ exposure
+EXPOSURE_VERSION = 2            # firmware that understands 'E' and 'A'
+AEC_MAX = 1200
+AGC_MAX = 30
+WB_PRESETS = {0: "automatic", 1: "sunny", 2: "cloudy", 3: "office", 4: "home"}
+EXPOSURE_REPLY = "BLTCAM-EXPOSURE"
+# Per machine, next to the bCNC ini like the other lid camera files.
+EXPOSURE_FILE_SUFFIX = "-lidcam-exposure.json"
+
+
+def default_exposure_path():
+    """Utils.iniUser + EXPOSURE_FILE_SUFFIX, for tools that run without bCNC's
+    Utils (which needs the whole interface)."""
+    return os.path.expanduser("~/.bCNC") + EXPOSURE_FILE_SUFFIX
+
+
+def exposure_command(aec, agc, wb):
+    """b'E' + six letters a-p (hex digits). Letters, never digits: a stray
+    '1'-'4' on this port moves the probe pin."""
+    aec, agc, wb = int(aec), int(agc), int(wb)
+    if not (0 <= aec <= AEC_MAX and 0 <= agc <= AGC_MAX and wb in WB_PRESETS):
+        raise ValueError("exposure out of range: aec=%s agc=%s wb=%s" % (aec, agc, wb))
+    v = (aec << 12) | (agc << 4) | wb
+    return b"E" + bytes(ord("a") + ((v >> (4 * i)) & 15) for i in range(5, -1, -1))
+
+
+def _exposure_reply(port, timeout_s):
+    deadline = time.time() + timeout_s
+    reader = _Reader(port)
+    while True:
+        line = reader.readline(deadline)
+        if line.startswith(EXPOSURE_REPLY):
+            if line.split()[1:2] == ["bad"]:
+                raise CameraError("the camera refused the exposure settings")
+            return line
+
+
+def set_exposure(port, aec, agc, wb, timeout_s=IDENTIFY_TIMEOUT_S):
+    """Fix exposure, gain and white balance (firmware 2+). Takes effect from
+    the next capture. The caller holds the port's lock."""
+    port.write(exposure_command(aec, agc, wb))
+    return _exposure_reply(port, timeout_s)
+
+
+def set_auto_exposure(port, timeout_s=IDENTIFY_TIMEOUT_S):
+    """Back to automatic exposure, gain and white balance (firmware 2+)."""
+    port.write(b"A")
+    return _exposure_reply(port, timeout_s)
+
+
+def load_exposure(path):
+    """The saved calibration, {"aec", "agc", "wb", ...}, or None."""
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+        exposure_command(rec["aec"], rec["agc"], rec["wb"])     # validates
+        return rec
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_exposure(path, rec):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=1)
+    os.replace(tmp, path)
+
+
+def apply_saved_exposure(port, version, path):
+    """After identify: fix the camera's exposure to the saved calibration, if
+    there is one and the firmware can. Returns the record applied, or None
+    (the camera stays automatic)."""
+    if version < EXPOSURE_VERSION or not path:
+        return None
+    rec = load_exposure(path)
+    if rec is None:
+        return None
+    set_exposure(port, rec["aec"], rec["agc"], rec["wb"])
+    return rec
 
 
 TAGS = ("@IMG", "@CHK", "@END", "@ERR")

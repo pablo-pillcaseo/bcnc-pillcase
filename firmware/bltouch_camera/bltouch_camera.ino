@@ -25,8 +25,22 @@
 //   2  Pull pin up            (unchanged)
 //   3  Self Test              (unchanged)
 //   4  Alarm Release & Touch SW Mode (unchanged)
-//   I  Identify: replies "BLTCAM 1 <camera|nocamera>"
+//   I  Identify: replies "BLTCAM 2 <camera|nocamera>" (2: has E and A)
 //   C  Capture one JPEG of the work area (framed, see below)
+//   E  Fixed exposure, gain and white balance, followed by exactly six letters
+//      a-p, each one hex digit (a=0 ... p=15):
+//        3 letters  exposure time, 0-1200 (the OV2640's AEC value)
+//        2 letters  gain, 0-30
+//        1 letter   white balance preset: 0 automatic, 1 sunny, 2 cloudy,
+//                   3 office, 4 home
+//      e.g. "Eaghaab" = exposure 0x067 (103), gain 0, sunny. Replies
+//      "BLTCAM-EXPOSURE manual aec=.. agc=.. wb=..". Letters, never digits:
+//      a stray '1'-'4' would move the probe pin, and firmware without E
+//      ignores letters. Any other character ends the command early (it is
+//      then handled as itself) and the reply is "BLTCAM-EXPOSURE bad".
+//      Takes effect from the next capture.
+//   A  Automatic exposure, gain and white balance again (the default).
+//      Replies "BLTCAM-EXPOSURE auto".
 //   K/J  Acknowledge a capture piece (echo the token at the end of its header)
 //   N    The last @CHK arrived damaged: send it again now
 //   S  Status line, for diagnosing the camera: "BLTCAM-STATUS ..."
@@ -108,6 +122,22 @@ const size_t CHUNK_BYTES = 2048;
 // Frames thrown away after the sensor starts, while auto exposure and white
 // balance settle. The first frames out of a cold OV2640 are dark and green.
 const int WARMUP_FRAMES = 6;
+// Frames thrown away after exposure settings change: the sensor applies
+// them from the frame after next.
+const int SETTLE_FRAMES = 2;
+
+// Exposure: automatic (the default), or fixed by the host with 'E' so every
+// photo is taken the same way. Written by loop(), applied by the camera task
+// before its next capture, so only the camera task ever talks to the sensor.
+volatile bool expoManual = false;
+volatile int expoAec = 0, expoAgc = 0, expoWb = 0;
+volatile bool expoPending = false;
+// 'E' parsing: how many letters are in, and their value so far.
+int expoLetters = -1;               // -1: not reading an 'E' command
+uint32_t expoValue = 0;
+unsigned long expoStarted = 0;
+const unsigned long EXPO_TIMEOUT_MS = 500;
+const int EXPO_LETTERS = 6;
 
 enum CameraState { CAM_OFF, CAM_READY, CAM_FAILED };
 CameraState cameraState = CAM_OFF;
@@ -167,6 +197,31 @@ bool sendAcked(const char *header, const uint8_t *data, size_t n) {
   return false;
 }
 
+// Set the sensor to the current exposure settings: automatic, or fixed.
+void applyExposure(sensor_t *s) {
+  if (!expoManual) {
+    s->set_wb_mode(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    return;
+  }
+  s->set_exposure_ctrl(s, 0);
+  s->set_aec2(s, 0);
+  s->set_aec_value(s, expoAec);
+  s->set_gain_ctrl(s, 0);
+  s->set_agc_gain(s, expoAgc);
+  if (expoWb == 0) {
+    s->set_wb_mode(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+  } else {
+    s->set_whitebal(s, 0);
+    s->set_wb_mode(s, expoWb);    // fixed gains of that preset
+  }
+}
+
 bool startCamera() {
   camera_config_t config = {};
   config.pin_pwdn = CAM_PIN_PWDN;
@@ -209,12 +264,8 @@ bool startCamera() {
     return false;
   }
   sensor_t *s = esp_camera_sensor_get();
-  if (s) {
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_exposure_ctrl(s, 1);
-    s->set_gain_ctrl(s, 1);
-  }
+  if (s) applyExposure(s);
+  expoPending = false;
   for (int i = 0; i < WARMUP_FRAMES; i++) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (fb) { framesOk++; esp_camera_fb_return(fb); } else { framesFailed++; }
@@ -277,6 +328,16 @@ void sendCapture(uint32_t seq) {
     snprintf(line, sizeof(line), "@ERR %lu no camera", (unsigned long)seq);
     printLine(line);
     return;
+  }
+
+  if (expoPending) {
+    expoPending = false;
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) applyExposure(s);
+    for (int i = 0; i < SETTLE_FRAMES; i++) {
+      camera_fb_t *f = esp_camera_fb_get();
+      if (f) { framesOk++; esp_camera_fb_return(f); } else { framesFailed++; }
+    }
   }
 
   // With one buffer filled only on demand, the frame waiting in it may be
@@ -358,12 +419,51 @@ void setup() {
   xTaskCreatePinnedToCore(cameraTaskMain, "camera", 8192, nullptr, 1, &cameraTask, 0);
 }
 
+// Collect the letters after an 'E'. Returns true while it consumed a byte,
+// false when there is nothing for it (no 'E' under way, or the next byte is
+// not one of its letters and is left for the normal commands).
+bool readExposureLetters() {
+  if (expoLetters < 0) return false;
+  if (millis() - expoStarted > EXPO_TIMEOUT_MS) {
+    expoLetters = -1;
+    printLine("BLTCAM-EXPOSURE bad");
+    return false;
+  }
+  if (!Serial.available()) return true;        // wait for the next letter
+  int c = Serial.peek();
+  if (c < 'a' || c > 'p') {                     // not ours: abandon, handle it normally
+    expoLetters = -1;
+    printLine("BLTCAM-EXPOSURE bad");
+    return false;
+  }
+  Serial.read();
+  expoValue = (expoValue << 4) | (uint32_t)(c - 'a');
+  if (++expoLetters < EXPO_LETTERS) return true;
+  expoLetters = -1;
+  int aec = (expoValue >> 12) & 0xFFF, agc = (expoValue >> 4) & 0xFF, wb = expoValue & 0xF;
+  if (aec > 1200 || agc > 30 || wb > 4) {
+    printLine("BLTCAM-EXPOSURE bad");
+    return true;
+  }
+  expoAec = aec;
+  expoAgc = agc;
+  expoWb = wb;
+  expoManual = true;
+  expoPending = true;
+  char line[64];
+  snprintf(line, sizeof(line), "BLTCAM-EXPOSURE manual aec=%d agc=%d wb=%d", aec, agc, wb);
+  printLine(line);
+  return true;
+}
+
 void loop() {
   // Print touch event outside the ISR
   if (touched) {
     touched = false;
     printLine("Touch");
   }
+
+  if (readExposureLetters()) return;
 
   if (Serial.available()) {
     char inByte = (char)Serial.read();
@@ -388,23 +488,35 @@ void loop() {
         break;
       case 'I': {  // Identify
         char line[48];
-        snprintf(line, sizeof(line), "BLTCAM 1 %s",
+        snprintf(line, sizeof(line), "BLTCAM 2 %s",
                  cameraState == CAM_FAILED ? "nocamera" : "camera");
         printLine(line);
         break;
       }
+      case 'E':  // Fixed exposure: six letters follow (readExposureLetters)
+        expoLetters = 0;
+        expoValue = 0;
+        expoStarted = millis();
+        break;
+      case 'A':  // Automatic exposure again
+        expoManual = false;
+        expoPending = true;
+        printLine("BLTCAM-EXPOSURE auto");
+        break;
       case 'C':  // Capture (on the camera task, never here)
         captureSeq++;
         xTaskNotifyGive(cameraTask);
         break;
       case 'S': {  // Status
-        char line[160];
+        char line[200];
         sensor_t *s = cameraState == CAM_READY ? esp_camera_sensor_get() : nullptr;
         snprintf(line, sizeof(line),
-                 "BLTCAM-STATUS psram=%u free_psram=%u heap=%u cam=%d init_err=0x%x pid=0x%x ok=%lu failed=%lu",
+                 "BLTCAM-STATUS psram=%u free_psram=%u heap=%u cam=%d init_err=0x%x pid=0x%x ok=%lu failed=%lu"
+                 " exposure=%s aec=%d agc=%d wb=%d",
                  (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram(), (unsigned)ESP.getFreeHeap(),
                  (int)cameraState, (unsigned)cameraInitErr, s ? (unsigned)s->id.PID : 0u,
-                 (unsigned long)framesOk, (unsigned long)framesFailed);
+                 (unsigned long)framesOk, (unsigned long)framesFailed,
+                 expoManual ? "manual" : "auto", expoAec, expoAgc, expoWb);
         printLine(line);
         break;
       }

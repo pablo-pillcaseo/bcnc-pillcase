@@ -368,9 +368,76 @@ def _blob_to_lid(contours, shape, ppm, method, min_fill=0.7, max_width=MAX_LID_M
     _area, c, (cx, cy), (w, h), ang = best
     lid_mask = np.zeros(shape[:2], np.uint8)
     cv.drawContours(lid_mask, [c], -1, 255, cv.FILLED)
-    box = cv.boxPoints(((cx, cy), (w, h), ang))
-    dims = sorted((w / ppm, h / ppm))
-    return Lid((dims[0], dims[1]), (cx / ppm, cy / ppm), ang, lid_mask, box, method)
+    box = _robust_box(lid_mask, cv.boxPoints(((cx, cy), (w, h), ang)), ppm)
+    # The lid's pixels are those inside its box: a strip outside it is not lid.
+    inside = np.zeros(shape[:2], np.uint8)
+    cv.fillConvexPoly(inside, box.astype(np.int32), 255)
+    lid_mask &= inside
+    sides = (float(np.linalg.norm(box[1] - box[0])) / ppm, float(np.linalg.norm(box[3] - box[0])) / ppm)
+    dims = sorted(sides)
+    centre = box.mean(axis=0)
+    return Lid((dims[0], dims[1]), (float(centre[0]) / ppm, float(centre[1]) / ppm), ang,
+               lid_mask, box, method)
+
+
+def _robust_box(mask, box, ppm, bin_mm=2.0):
+    """The lid's rectangle from its blob, ignoring strips along its sides.
+
+    The smallest rectangle around a blob has to take in every bump on it. A
+    lid's shadow, or its side wall, shows on a light patch of fixture beside it
+    (white paper, a label) and not on the black around it, so the blob grows
+    strips along part of a side, and that rectangle comes out wider and tilted.
+    Here each side goes where most of the blob's edge is: the blob is cut into
+    slices across that side, and the side is the median of the slices' ends.
+    A strip along less than half of a side, or a rounded corner, moves nothing.
+    The long sides also set the angle, the same way, before the ends are found.
+    """
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 100:
+        return box.astype(np.float32)
+    pts = np.stack([xs, ys], axis=1).astype(np.float64)
+    p0, p1, _p2, p3 = box.astype(np.float64)
+    e1 = p1 - p0 if np.linalg.norm(p1 - p0) >= np.linalg.norm(p3 - p0) else p3 - p0
+    e1 /= np.linalg.norm(e1)                    # along the long side
+    c = pts.mean(axis=0)
+    step = max(2.0, bin_mm * ppm)
+
+    def slices(a, b):
+        """Centre of each slice along `a`, and the min / max of `b` in it."""
+        k = np.floor((a - a.min()) / step).astype(int)
+        n = int(k.max()) + 1
+        lo, hi = np.full(n, np.inf), np.full(n, -np.inf)
+        np.minimum.at(lo, k, b)
+        np.maximum.at(hi, k, b)
+        full = np.bincount(k, minlength=n) >= step      # a slice with real width
+        centres = a.min() + (np.arange(n) + 0.5) * step
+        return centres[full], lo[full], hi[full]
+
+    for straighten in (True, False):
+        e2 = np.array([-e1[1], e1[0]])
+        u, v = (pts - c) @ e1, (pts - c) @ e2
+        uc, vlo, vhi = slices(u, v)
+        if len(uc) < 3:
+            return box.astype(np.float32)
+        if straighten:
+            slopes = []
+            for edge in (vlo, vhi):
+                near = np.abs(edge - np.median(edge)) < 2 * ppm
+                if near.sum() >= 5:
+                    slopes.append(np.polyfit(uc[near], edge[near], 1)[0])
+            if not slopes:
+                break
+            t = np.arctan(np.median(slopes))
+            e1 = np.cos(t) * e1 + np.sin(t) * e2
+            continue
+    v0, v1 = np.median(vlo), np.median(vhi)
+    _vc, ulo, uhi = slices(v, u)
+    if len(ulo) < 3:
+        return box.astype(np.float32)
+    u0, u1 = np.median(ulo), np.median(uhi)
+    corners = [c + u0 * e1 + v0 * e2, c + u1 * e1 + v0 * e2,
+               c + u1 * e1 + v1 * e2, c + u0 * e1 + v1 * e2]
+    return np.array(corners, np.float32)
 
 
 def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0], min_width=MIN_LID_MM):
@@ -424,6 +491,15 @@ def refine_lid(view, lid, ppm, method, max_width=MAX_LID_MM[0], min_width=MIN_LI
     return refined
 
 
+# The camera this far from where the empty-bed photo was taken: a warning.
+CAMERA_MOVED_MM = 10.0
+
+# Where the empty bed is darker than this (8-bit L), a lightness change of more
+# than DARK_BED_DIFF counts as a lid: see find_lid_by_background.
+DARK_BED_L = 80
+DARK_BED_DIFF = 12
+
+
 def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_LID_MM[0],
                            min_width=MIN_LID_MM):
     """The lid as what changed since the empty-bed photo."""
@@ -435,7 +511,16 @@ def find_lid_by_background(view, valid, background, exclude, ppm, max_width=MAX_
     diff = np.abs(a - b)
     # Lightness counts for less: a shadow changes L, not a and b.
     score = np.maximum(diff[..., 0] // 2, np.maximum(diff[..., 1], diff[..., 2]) * 2)
-    mask = (score > 18).astype(np.uint8) * 255
+    changed = score > 18
+    # Except where the empty bed is dark (the black fixture): a shadow hardly
+    # changes black, while a dark lid on it is only a little lighter (15-22 in
+    # L on a Matte Black lid) - under the threshold above, but over its whole
+    # area. Without this, such a lid shows only where it covers something light
+    # and falls apart into patches. A hole's edge shifted by a fraction of a mm
+    # passes too, but only as a thin line, which the opening below removes.
+    # (Measured: the lid comes out the same anywhere from 10 to 14.)
+    changed |= (b[..., 0] < DARK_BED_L) & (diff[..., 0] > DARK_BED_DIFF)
+    mask = changed.astype(np.uint8) * 255
     mask[(valid == 0) | (exclude > 0)] = 0
     k = cv.getStructuringElement(cv.MORPH_ELLIPSE, (int(ppm * 3) | 1, int(ppm * 3) | 1))
     mask = cv.morphologyEx(mask, cv.MORPH_OPEN, k)
@@ -474,6 +559,90 @@ def find_lid_by_edges(view, valid, exclude, ppm, max_width=MAX_LID_MM[0], min_wi
     return lid and refine_lid(view, lid, ppm, "edges", max_width, min_width)
 
 
+# ------------------------------------------------------------ fixture corner
+# A lid "in the corner": its side along the fence within this angle, and its
+# fence-side edge within this distance of the fence line.
+CORNER_ANGLE_DEG = 4.0
+CORNER_EDGE_MM = 6.0
+
+
+class LidCorner:
+    """Where lids sit: pushed into the same corner of the fixture, so every
+    lid's upper-left corner is in one place and its sides run the same way.
+
+    Kept in the bed plane, in mm from marker `ref` (the markers are stuck on
+    the fixture), so it holds wherever the camera is. Recorded from one lid
+    that outlines well (`corner_from_result`).
+
+      corner      [x, y] mm: the lid's corner at the fixture's corner
+      along       unit vector along the lid's long side, away from the corner
+      across      unit vector along its short side, away from the fence
+    """
+
+    def __init__(self, ref, corner, along, across):
+        self.ref = int(ref)
+        self.corner = np.asarray(corner, np.float64)
+        self.along = np.asarray(along, np.float64)
+        self.across = np.asarray(across, np.float64)
+
+    def to_dict(self):
+        return {"ref": self.ref, "corner": self.corner.tolist(),
+                "along": self.along.tolist(), "across": self.across.tolist()}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["ref"], d["corner"], d["along"], d["across"])
+
+
+def corner_from_result(res):
+    """The LidCorner of the lid found in `res`, taking its upper-left corner as
+    seen by the camera. None without a lid or markers."""
+    if res.lid is None or res.plane is None or res.lid_outline is None:
+        return None
+    box = res.lid.box_px.astype(np.float64)                 # rectified px
+    img = np.asarray(res.lid_outline, np.float64)           # the same corners, photo px
+    i = int(np.argmin(img[:, 0] + img[:, 1]))               # upper left in the photo
+    prev, nxt = box[(i - 1) % 4], box[(i + 1) % 4]
+    c = box[i]
+    a, b = nxt - c, prev - c
+    along, across = (a, b) if np.linalg.norm(a) >= np.linalg.norm(b) else (b, a)
+    x0, y0 = res.region[0], res.region[1]
+    corner_mm = c / res.ppm + [x0, y0]
+    return LidCorner(res.plane.ref, corner_mm, along / np.linalg.norm(along),
+                     across / np.linalg.norm(across))
+
+
+def snap_to_corner(lid, corner, region, ppm, valid):
+    """The lid anchored on the fixture's corner, if it is in it: its fence
+    sides become the corner's lines, and only its far side and far end come
+    from what was found. Those are the edges the camera sees best; the end at
+    the fence (a dark lid on the black fixture, under the fence's shadow) is
+    the one it loses. Returns (lid, in_corner)."""
+    c = (corner.corner - [region[0], region[1]]) * ppm      # rectified px
+    box = lid.box_px.astype(np.float64)
+    u = (box - c) @ corner.along / ppm                      # mm along the long side
+    v = (box - c) @ corner.across / ppm                     # mm across, from the fence
+    sides = [box[(k + 1) % 4] - box[k] for k in range(4)]
+    long_side = max(sides, key=np.linalg.norm)
+    cos = abs(float(long_side @ corner.along)) / max(np.linalg.norm(long_side), 1e-9)
+    angle = np.degrees(np.arccos(min(1.0, cos)))
+    if angle > CORNER_ANGLE_DEG or abs(v.min()) > CORNER_EDGE_MM or u.min() < -CORNER_EDGE_MM:
+        return lid, False
+    length, width = float(u.max()), float(v.max())
+    if length <= 0 or width <= 0:
+        return lid, False
+    L, W = corner.along * length * ppm, corner.across * width * ppm
+    new_box = np.array([c, c + L, c + L + W, c + W], np.float32)
+    mask = np.zeros(lid.mask.shape, np.uint8)
+    cv.fillConvexPoly(mask, new_box.astype(np.int32), 255)
+    mask[valid == 0] = 0
+    centre = new_box.mean(axis=0)
+    dims = sorted((length, width))
+    out = Lid((dims[0], dims[1]), (float(centre[0]) / ppm, float(centre[1]) / ppm), lid.angle,
+              mask, new_box, lid.method)
+    return out, True
+
+
 def mark_clipped(lid, valid, ppm):
     """Flag a lid that runs off the edge of the view, and which way.
 
@@ -481,7 +650,12 @@ def mark_clipped(lid, valid, ppm):
     cut off. A cut across the box's long axis means only part of the length is
     in view: the width is still measured exactly, the length becomes a minimum.
     """
-    near_edge = cv.dilate((valid == 0).astype(np.uint8), np.ones((int(3 * ppm) | 1,) * 2, np.uint8))
+    # The view's own border is an edge too: with an empty-bed photo the view
+    # is that photo's area, and a lid can run past it.
+    outside = (valid == 0).astype(np.uint8)
+    outside[[0, -1], :] = 1
+    outside[:, [0, -1]] = 1
+    near_edge = cv.dilate(outside, np.ones((int(3 * ppm) | 1,) * 2, np.uint8))
     ys, xs = np.nonzero((lid.mask > 0) & (near_edge > 0))
     if len(xs) == 0:
         return lid
@@ -718,11 +892,12 @@ def score(candidates, measured_size, colour, reference_colour, length_is_min=Fal
 
 # --------------------------------------------------------------- the lot
 def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER_MM,
-             size_scale=1.0, background=None):
+             size_scale=1.0, background=None, corner=None):
     """Everything above, in order. Never raises for a bad scene: what could not
     be done is in `result.warnings`, and confidence falls accordingly.
 
     `background`: dict from `background_record`, or None.
+    `corner`: LidCorner, or None: a lid in the fixture's corner is anchored on it.
     """
     res = Result()
     img = decode_jpeg(jpeg_or_img) if isinstance(jpeg_or_img, (bytes, bytearray)) else jpeg_or_img
@@ -752,6 +927,15 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
                                 "printed at a different size?" % plane.rms_mm)
         if use_bg:
             region, ppm = tuple(background["region"]), background["ppm"]
+            # The comparison needs the camera where it was for the empty-bed
+            # photo: raised things (the fence, the bed beyond the fixture) do
+            # not line up from elsewhere, and the view covers other ground.
+            here = visible_region(img.shape, plane)
+            moved = max(abs(a - b) for a, b in zip(here, region))
+            if moved > CAMERA_MOVED_MM:
+                res.warnings.append("The camera has moved %.0f mm since the empty-bed photo: "
+                                    "lids are found less well. Save the empty bed again "
+                                    "(with no lid) from here." % moved)
         else:
             region = visible_region(img.shape, plane)
             ppm = fit_ppm(region)
@@ -782,6 +966,16 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
         if lid is None:
             res.warnings.append("No lid found on the bed.")
         else:
+            if corner is not None:
+                if corner.ref != plane.ref:
+                    res.warnings.append("The fixture corner was set with marker %d, which is "
+                                        "not the one in use: lid measured on its own."
+                                        % corner.ref)
+                else:
+                    lid, in_corner = snap_to_corner(lid, corner, region, ppm, valid)
+                    if not in_corner:
+                        res.warnings.append("The lid is not in the fixture's corner: measured "
+                                            "on its own.")
             lid = mark_clipped(lid, valid, ppm)
             lid.size_mm = (lid.size_mm[0] * size_scale, lid.size_mm[1] * size_scale)
             res.lid = lid
