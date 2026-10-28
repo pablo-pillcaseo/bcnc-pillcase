@@ -1,18 +1,23 @@
-"""Tote Scanning: engraver login and the scanned tote's list of lids.
+"""Tote Scanning: engraver login and the open totes' lists of lids.
 
 This frame is the Tote Scanning section of the Lid Engravings tab (SurfAlignPage).
 The loop at the machine:
   1. The engraver logs in here - tap a name, or scan / type it - as at the logger's
      station tablet. A scan with nobody logged in lands here first.
-  2. A tote/order scan is looked up in ShipHero and its lids are listed here.
-  3. Engrave Selected fills the G-code fields and generates the preview. The
-     engraver checks it and presses Align & Run.
-  4. When that program finishes without error the lid is crossed off, a completion
-     record is handed to EngravingLog, and the next lid is selected - or, once the
-     tote is done, the scan field is ready for the next tote.
+  2. A tote/order scan is looked up in ShipHero and its lids are listed here,
+     under the tote, alongside any other totes still open.
+  3. A lid placed in the fixture is identified by the lid camera (LidCamera),
+     which selects it here; or the engraver picks it.
+  4. Confirm Lid fills the G-code fields and generates the preview. The same
+     button, now Start Engraving, runs Align & Run.
+  5. When that program finishes without error the lid is crossed off, a completion
+     record is handed to EngravingLog, and the next lid is selected. A tote whose
+     lids are all done closes by itself a moment later; Close Tote closes one
+     sooner. Lids done on another station cross off here too (LanSync).
 """
 
 import socket
+import time
 from tkinter import (
     BOTH, END, LEFT, RIGHT, TOP, NW, NE, E, W, X, Y, YES, VERTICAL,
     BooleanVar, Button, Checkbutton, Entry, Frame, Label, LabelFrame, Scrollbar,
@@ -33,6 +38,37 @@ from Utils import _
 
 _SECTION = "Engraving"
 
+# A tote whose lids are all done closes this long after, so the last lid's
+# cross-off is seen first.
+TOTE_CLOSE_MS = 5000
+# Keys typed into the lid list within this long before Enter are a barcode
+# scan, not a press of the engrave button.
+SCAN_KEYS_S = 1.0
+
+
+class OpenTote:
+    """A scanned tote or order, listed until it is done or closed."""
+
+    _ids = 0
+
+    def __init__(self, scan, mode, rows):
+        OpenTote._ids += 1
+        self.id = OpenTote._ids             # names its rows in the list
+        self.scan = scan
+        self.mode = mode
+        self.key = ES.scan_key(mode, scan)
+        self.rows = list(rows)
+        self.row_keys = ES.row_keys(self.rows)
+        self.lid_override = {}              # row index -> lid picked by hand
+        self.closing = None                 # after() id of its pending close
+
+    @property
+    def noun(self):
+        return _("Tote") if self.mode == "Tote" else _("Order")
+
+    def engravings(self):
+        return [i for i, r in enumerate(self.rows) if ES.has_engraving(r)]
+
 
 class EngravingFrame(CNCRibbon.PageFrame):
 
@@ -44,13 +80,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.progress = ES.ProgressStore(Utils.iniUser + "-engraving-progress.json")
         LanSync.start(self.progress, self.machine_name())
 
-        # The scanned tote/order on show
-        self.rows = []
-        self.row_keys = []
-        self.scan_value = ""
-        self.search_mode = "Order"
-        self.tote_key = None
-        self.lid_override = {}      # row index -> lid picked by hand
+        self.totes = []             # OpenTote, newest first
+        self.odds = {}              # (tote key, row key) -> the camera's odds
+        self._armed = None          # (tote id, row): previewed, the button now starts it
+        self._camera_prompt = None  # (text, colour) from the lid camera
+        self._typed = ("", 0.0)     # keys typed into the list: a scan in progress
 
         self.active_job = None      # the lid last sent to SurfAlign from this list
         self._generated = None      # what the loaded G-code was generated from
@@ -140,49 +174,62 @@ class EngravingFrame(CNCRibbon.PageFrame):
         b.pack(side=LEFT)
         self.addWidget(b)
 
-        self.tote_var = StringVar(value=_("Scan a tote to list its engravings."))
-        self.tote_lbl = Label(box, textvariable=self.tote_var, font=("", 11, "bold"),
-                              anchor=W, justify=LEFT, wraplength=300)
-        self.tote_lbl.pack(side=TOP, fill=X)
+        # What to do next: scan, place a lid, confirm, check the preview...
+        self.prompt_var = StringVar()
+        self.prompt_lbl = Label(box, textvariable=self.prompt_var, font=("", 11, "bold"),
+                                anchor=W, justify=LEFT, wraplength=300)
+        self.prompt_lbl.pack(side=TOP, fill=X)
+        self.prompt_lbl.bind("<Configure>", lambda e: self.prompt_lbl.config(
+            wraplength=max(200, e.width - 8)))
 
         # Above the list, so it stays on screen however short the window is: Tk
-        # squeezes the last-packed widgets (the details) first.
-        self.engrave_btn = Button(box, text=_("Engrave Selected  ▶"), command=self.engrave_selected,
-                                  bg="#2E75B6", fg="white", activebackground="#1F3B57",
-                                  activeforeground="white", font=("", 11, "bold"))
+        # squeezes the last-packed widgets (the details) first. Pressed once it
+        # shows the preview; pressed again it starts the engraving.
+        self.engrave_btn = Button(box, command=self.engrave_selected, fg="white",
+                                  activeforeground="white", font=("", 12, "bold"), pady=6)
         self.engrave_btn.pack(side=TOP, fill=X, pady=(4, 0))
+        self.engrave_btn.bind("<Return>", self.engrave_selected)
         self.addWidget(self.engrave_btn)
-        # Photographs the bed and picks the lid in the list (LidCamera).
-        self.camera_btn = Button(box, text=_("📷  Identify Lid on Bed"),
-                                 command=lambda: self.lidcam.identify())
+        self._update_engrave_button()
+        bar = self.tools_bar = Frame(box)
+        bar.pack(side=TOP, fill=X, pady=(2, 0))
+        # Takes a photo now, whatever the camera was waiting for (LidCamera).
+        self.camera_btn = Button(bar, text=_("📷  Look Again"), command=lambda: self.lidcam.look(force=True))
         self.addWidget(self.camera_btn)
-        self.update_camera_button()
+        self.close_btn = Button(bar, text=_("Close Tote"), command=self.close_selected_tote)
+        self.close_btn.pack(side=RIGHT)
         self.warn_var = StringVar()
         warn_lbl = Label(box, textvariable=self.warn_var, fg="red", anchor=W, justify=LEFT,
                          wraplength=300)
         # Takes a line only while there is a warning to show
         self.warn_var.trace_add("write", lambda *a: warn_lbl.pack(
-            side=TOP, fill=X, after=self._last_button()) if self.warn_var.get() else warn_lbl.pack_forget())
+            side=TOP, fill=X, after=self.tools_bar) if self.warn_var.get() else warn_lbl.pack_forget())
 
         style = ttk.Style()
-        style.configure("EngravingItems.Treeview", rowheight=24)
+        # Rows as tall as the text (and its icon): a fixed height clips larger fonts.
+        line = tkFont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("EngravingItems.Treeview", rowheight=max(24, line + 8))
         style.layout("EngravingItems.Treeview.Item", [
             ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Treeitem.indicator", {"side": "left", "sticky": ""}),
                 ("Treeitem.image", {"side": "left", "sticky": ""}),
                 ("Treeitem.text", {"sticky": "nswe"}),
             ]})
         ])
         tc = Frame(box)
         # Fixed and short, so the preview controls and Align & Run below Tote
-        # Scanning stay on screen; a bigger tote scrolls the list.
+        # Scanning stay on screen; more lids scroll the list.
         tc.pack(side=TOP, fill=X, pady=2)
         tree = self.tree = ttk.Treeview(tc, style="EngravingItems.Treeview",
-                                        columns=("Engraving", "Order"),
-                                        show="tree headings", height=5)
+                                        columns=("Engraving", "Camera", "Order"),
+                                        show="tree headings", height=8)
         tree.heading("#0", text=_("Case Type / Colour"))
-        tree.column("#0", width=160, minwidth=120)
+        tree.column("#0", width=170, minwidth=120)
         tree.heading("Engraving", text=_("Engraving"))
         tree.column("Engraving", width=80, minwidth=50)
+        tree.heading("Camera", text="📷")
+        odds_w = tkFont.nametofont("TkDefaultFont").measure("100%") + 12
+        tree.column("Camera", width=odds_w, minwidth=odds_w, anchor=E, stretch=False)
         tree.heading("Order", text=_("Order"))
         tree.column("Order", width=60, minwidth=45)
         # Scrollbar packed first: packed after, a wide list squeezes it out.
@@ -194,22 +241,34 @@ class EngravingFrame(CNCRibbon.PageFrame):
         done_font = tkFont.nametofont("TkDefaultFont").copy()
         done_font.configure(overstrike=1)
         self._done_font = done_font     # Tk drops a font nobody holds
+        tote_font = tkFont.nametofont("TkDefaultFont").copy()
+        tote_font.configure(weight="bold")
+        self._tote_font = tote_font
+        tree.tag_configure("tote", font=tote_font, background="#dde6ee")
+        tree.tag_configure("tote_done", foreground="#1a7f37")
         tree.tag_configure("done", foreground="gray", font=done_font)
         tree.tag_configure("unmapped", background="#ffcccc")
         tree.tag_configure("warned", background="#fff0cc")
+        tree.tag_configure("likely", background="#d4f0d4")
 
         tree.bind("<<TreeviewSelect>>", self._on_select)
         tree.bind("<Double-1>", self.engrave_selected)
-        tree.bind("<Return>", self.engrave_selected)
+        tree.bind("<Return>", self._on_list_return)
+        tree.bind("<KP_Enter>", self._on_list_return)
+        # A barcode scanner types into whatever has focus: typed here, it is
+        # collected and handed to the scan field on Enter, never reaching
+        # bCNC's own key bindings (1-3 set the jog step, ! holds the feed).
+        tree.bind("<Key>", self._on_list_key)
         # ttk.Treeview's own Up/Down bindings don't stop the key from also
         # reaching bCNC's toplevel jog bindings (acceptKey() doesn't know about
         # Treeview), so without an explicit "break" here, arrow-keying through
-        # this list jogs the mill. Left/Right have no meaning in this flat
-        # list, so they're just swallowed rather than remapped.
+        # this list jogs the mill. Left/Right are just swallowed.
         tree.bind("<Up>", lambda e: self._move_selection(-1))
         tree.bind("<Down>", lambda e: self._move_selection(1))
         tree.bind("<Left>", lambda e: "break")
         tree.bind("<Right>", lambda e: "break")
+        self.update_camera_button()
+        self._update_prompt()
 
         self.hide_non_engraving = BooleanVar(value=True)
         Checkbutton(box, text=_("Hide non-engraving items"), variable=self.hide_non_engraving,
@@ -257,14 +316,15 @@ class EngravingFrame(CNCRibbon.PageFrame):
               font=("", 8), wraplength=320).grid(row=5, column=0, columnspan=2, sticky=NW)
 
     def update_camera_button(self):
-        """Show Identify Lid only while the lid camera is switched on."""
+        """Show Look Again and the odds only while the lid camera is switched on."""
         if LidCamera.enabled():
-            self.camera_btn.pack(side=TOP, fill=X, pady=(2, 0), after=self.engrave_btn)
+            self.camera_btn.pack(side=LEFT)
+            self.tree.configure(displaycolumns=("Engraving", "Camera", "Order"))
         else:
             self.camera_btn.pack_forget()
-
-    def _last_button(self):
-        return self.camera_btn if self.camera_btn.winfo_manager() else self.engrave_btn
+            self.tree.configure(displaycolumns=("Engraving", "Order"))
+            self.show_odds({}, None)
+            self.set_camera_prompt(None)
 
     def _scan_label_text(self):
         mode = Utils.getStr("SurfAlign", "shipheroSearchMode", "Order")
@@ -347,13 +407,10 @@ class EngravingFrame(CNCRibbon.PageFrame):
                 self.logout(auto=True)
             self._update_stats()
             if LanSync.drain(self.progress):
+                # Lids done on a peer cross off here, and a tote it finished
+                # closes here too - without yanking focus away from whatever
+                # this station's operator is doing right now.
                 self._refresh_tree()
-                # A peer just finished the last lid of the tote open here too -
-                # get it ready to be replaced, without yanking focus away from
-                # whatever this station's operator is doing right now.
-                if (self.tote_key and any(ES.has_engraving(r) for r in self.rows)
-                        and not self._remaining()):
-                    self._select_tote_text()
             self._update_peer_label()
         except Exception as e:
             print("[engraving] tick error:", repr(e))
@@ -386,57 +443,108 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.scan_entry.select_range(0, END)
         self.scan_entry.icursor(END)
 
-    def _select_tote_text(self):
-        """Select the scan field's text without taking focus or switching pages -
-        a peer finishing this tote shouldn't yank this station away from
-        whatever its operator is doing. A scan/type here still replaces it."""
-        try:
-            self.scan_entry.select_range(0, END)
-        except Exception:
-            pass
-
     def scan(self, event=None):
         self._gen().fetchShipHeroOrder(self.scan_entry.get())
         return "break"
 
-    def load_order(self, scan_value, search_mode, rows, identify=True):
-        """Show a looked-up tote/order, ready to pick a lid. `identify`: let
-        the lid camera look at the bed (not when the camera itself loads an
-        order to select one of its lids)."""
-        self.scan_value = str(scan_value or "").strip()
-        self.search_mode = search_mode
-        self.tote_key = ES.scan_key(search_mode, self.scan_value)
-        self.rows = list(rows)
-        self.row_keys = ES.row_keys(self.rows)
-        self.lid_override = {}
+    def load_order(self, scan_value, search_mode, rows):
+        """List a looked-up tote/order at the top, ready to pick a lid. A tote
+        already open is refreshed in place; one with nothing to engrave leaves
+        when the next is scanned."""
+        scan_value = str(scan_value or "").strip()
+        tote = OpenTote(scan_value, search_mode, rows)
+        old = self.tote(tote.key)
+        if old is not None:
+            # Rescanned: the same lids, its hand-picked lids kept
+            tote.id, tote.lid_override = old.id, old.lid_override
+            self._cancel_close(old)
+        self.totes = [tote] + [t for t in self.totes if t.key != tote.key and t.engravings()]
         self.session.touch()
 
         self.scan_entry.delete(0, END)
-        self.scan_entry.insert(0, self.scan_value)
+        self.scan_entry.insert(0, scan_value)
         self.warn_var.set("")
         self._refresh_tree()
         self._show()
-        self._select_next()
-        self.lidcam.note_order()
-        if identify:
-            self.lidcam.after_scan()
+        self._select_next(tote)
+        self.lidcam.totes_changed()
+
+    # ================================================================ totes
+    def tote(self, key):
+        return next((t for t in self.totes if t.key == key), None)
+
+    def _tote_by_id(self, tote_id):
+        return next((t for t in self.totes if t.id == tote_id), None)
+
+    def _completed(self, tote):
+        return self.progress.completed(tote.key)
+
+    def _remaining(self, tote):
+        done = self._completed(tote)
+        return [i for i in tote.engravings() if tote.row_keys[i] not in done]
+
+    def waiting(self):
+        """Every lid still to engrave: [(tote, row index)], newest tote first."""
+        return [(t, i) for t in self.totes for i in self._remaining(t)]
+
+    def focus_tote(self):
+        """The tote being worked on: the selected lid's, else the newest."""
+        tote, _i, _row = self._selected()
+        if tote is None:
+            sel = self.tree.selection()
+            tote = self._tote_by_id(int(sel[0][1:])) if sel and sel[0].startswith("t") else None
+        return tote or (self.totes[0] if self.totes else None)
+
+    def close_tote(self, tote):
+        self._cancel_close(tote)
+        if tote not in self.totes:
+            return
+        was_selected = self._selected()[0] is tote
+        self.totes.remove(tote)
+        if self._armed and self._armed[0] == tote.id:
+            self._disarm()
+        self._refresh_tree()
+        if was_selected or not self.tree.selection():
+            self._select_next()
+        self.lidcam.totes_changed()
+
+    def close_selected_tote(self):
+        tote = self.focus_tote()
+        if tote is None:
+            return
+        left = len(self._remaining(tote))
+        if left and not messagebox.askyesno(
+                _("Close Tote"),
+                _("%s %s still has %d lid(s) to engrave.\n\nClose it anyway?")
+                % (tote.noun, tote.scan, left), parent=self):
+            return
+        self.close_tote(tote)
+        self._status(_("%s %s closed.") % (tote.noun, tote.scan))
+
+    def _cancel_close(self, tote):
+        if tote.closing is not None:
+            self.after_cancel(tote.closing)
+            tote.closing = None
+
+    def _schedule_closes(self):
+        """Close each finished tote shortly: done here, or on another station."""
+        for t in self.totes:
+            if t.closing is None and t.engravings() and not self._remaining(t):
+                t.closing = self.after(TOTE_CLOSE_MS, lambda t=t: self._close_if_done(t))
+
+    def _close_if_done(self, tote):
+        tote.closing = None
+        if tote in self.totes and not self._remaining(tote):
+            self.close_tote(tote)
 
     # ================================================================ list
-    def _completed(self):
-        return self.progress.completed(self.tote_key) if self.tote_key else set()
-
-    def _remaining(self):
-        done = self._completed()
-        return [i for i, row in enumerate(self.rows)
-                if ES.has_engraving(row) and self.row_keys[i] not in done]
-
-    def _lid_for(self, i):
-        if i in self.lid_override:
-            return self.lid_override[i]
+    def _lid_for(self, tote, i):
+        if i in tote.lid_override:
+            return tote.lid_override[i]
         gen = self._gen()
         if not hasattr(gen, "_lid_defaults"):
             gen._lid_defaults = gen._load_lid_defaults()
-        hits = PillcaseOrder.lids_for_product(gen._lid_defaults, self.rows[i].get("product_code"))
+        hits = PillcaseOrder.lids_for_product(gen._lid_defaults, tote.rows[i].get("product_code"))
         return hits[0] if hits else None
 
     def _colour_icon(self, row, size=18):
@@ -463,88 +571,119 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self._icon_cache[key] = icon
         return icon
 
-    def _header_text(self):
-        noun = _("Tote") if self.search_mode == "Tote" else _("Order")
-        total = sum(1 for r in self.rows if ES.has_engraving(r))
-        left = len(self._remaining())
+    def _header_text(self, tote):
+        total = len(tote.engravings())
+        left = len(self._remaining(tote))
         if not total:
-            return _("%s %s - nothing to engrave") % (noun, self.scan_value)
+            return _("%s %s - nothing to engrave") % (tote.noun, tote.scan)
         if not left:
-            return _("✓ %s %s - COMPLETE, all %d engraved") % (noun, self.scan_value, total)
-        return _("%s %s - %d of %d engraved") % (noun, self.scan_value, total - left, total)
+            return _("✓ %s %s - all %d done") % (tote.noun, tote.scan, total)
+        return _("%s %s - %d/%d done") % (tote.noun, tote.scan, total - left, total)
+
+    @staticmethod
+    def _iid(tote, i):
+        return "%d:%d" % (tote.id, i)
 
     def _refresh_tree(self):
         tree = self.tree
         selected = tree.selection()
         tree.delete(*tree.get_children())
-        done = self._completed()
-        for i, row in enumerate(self.rows):
-            engraving = ES.has_engraving(row)
-            if self.hide_non_engraving.get() and not engraving:
-                continue
-            finished = engraving and self.row_keys[i] in done
-            if finished:
-                tags = ("done",)
-            elif not self._lid_for(i):
-                tags = ("unmapped",)
-            elif row.get("warnings"):
-                tags = ("warned",)
-            else:
-                tags = ()
-            case = row.get("case_type") or row.get("product_code") or _("Unknown case")
-            text = "%s  –  %s" % (case, row.get("colour_name") or _("colour?"))
-            if finished:
-                text = "✓ " + text
-            icon = self._colour_icon(row)
-            kw = {"image": icon, "text": "  " + text} if icon else {"text": text}
-            tree.insert("", END, iid=str(i), values=(row.get("engraving") or "",
-                                                     row.get("order_number") or ""),
-                        tags=tags, **kw)
-        if self.rows:
-            self.tote_var.set(self._header_text())
-            self.tote_lbl.config(fg="#1a7f37" if not self._remaining() else "black")
+        for tote in self.totes:
+            done = self._completed(tote)
+            head = "t%d" % tote.id
+            # The tote's name where the lids' names go; its progress beside it
+            total, left = len(tote.engravings()), len(self._remaining(tote))
+            tree.insert("", END, iid=head, open=True,
+                        text=("✓ " if total and not left else "") + "%s %s" % (tote.noun, tote.scan),
+                        values=(_("%d/%d done") % (total - left, total) if total
+                                else _("nothing to engrave"), "", ""),
+                        tags=("tote",) if self._remaining(tote) or not tote.engravings()
+                        else ("tote", "tote_done"))
+            for i, row in enumerate(tote.rows):
+                engraving = ES.has_engraving(row)
+                if self.hide_non_engraving.get() and not engraving:
+                    continue
+                finished = engraving and tote.row_keys[i] in done
+                odds = None if finished else self.odds.get((tote.key, tote.row_keys[i]))
+                if finished:
+                    tags = ("done",)
+                elif not self._lid_for(tote, i):
+                    tags = ("unmapped",)
+                elif row.get("warnings"):
+                    tags = ("warned",)
+                elif odds is not None and odds == max(self.odds.values()):
+                    tags = ("likely",)
+                else:
+                    tags = ()
+                case = row.get("case_type") or row.get("product_code") or _("Unknown case")
+                text = "%s  –  %s" % (case, row.get("colour_name") or _("colour?"))
+                if finished:
+                    text = "✓ " + text
+                icon = self._colour_icon(row)
+                kw = {"image": icon, "text": "  " + text} if icon else {"text": text}
+                tree.insert(head, END, iid=self._iid(tote, i),
+                            values=(row.get("engraving") or "",
+                                    "" if odds is None else "%d%%" % round(100 * odds),
+                                    row.get("order_number") or ""),
+                            tags=tags, **kw)
         for iid in selected:
             if tree.exists(iid):
                 tree.selection_set(iid)
+        self._schedule_closes()
+        self._update_prompt()
+
+    def _row_iids(self):
+        """The lids' rows in the list, in order, without the tote headings."""
+        return [iid for head in self.tree.get_children() for iid in self.tree.get_children(head)]
 
     def _move_selection(self, delta):
         """Up/Down in the list, in place of the mill-jog binding they'd otherwise hit."""
-        children = self.tree.get_children()
-        if not children:
+        rows = self._row_iids()
+        if not rows:
             return "break"
         current = self.tree.focus() or (self.tree.selection() or (None,))[0]
-        idx = children.index(current) if current in children else -1
-        idx = max(0, min(len(children) - 1, idx + delta))
-        target = children[idx]
-        self.tree.selection_set(target)
-        self.tree.focus(target)
-        self.tree.see(target)
+        idx = rows.index(current) if current in rows else -1
+        idx = max(0, min(len(rows) - 1, idx + delta))
+        self.select_row(rows[idx])
         return "break"
 
-    def _select_next(self):
-        remaining = set(self._remaining())
-        children = self.tree.get_children()
-        target = next((iid for iid in children if int(iid) in remaining), None)
-        if target is None and children:
-            target = children[0]
+    def select_row(self, iid, focus=False):
+        tree = self.tree
+        if not tree.exists(iid):
+            return
+        tree.selection_set(iid)
+        tree.focus(iid)
+        tree.see(iid)
+        if focus:
+            tree.focus_set()
+
+    def _select_next(self, tote=None):
+        """The first lid still to engrave: in `tote` if it has one, else in any."""
+        waiting = [(t, i) for t, i in self.waiting() if tote is None or t is tote] or self.waiting()
+        rows = self._row_iids()
+        target = self._iid(*waiting[0]) if waiting else (rows[0] if rows else None)
         if target is None:
+            self.tree.selection_set(())
             self._on_select()
             return
-        self.tree.selection_set(target)
-        self.tree.focus(target)
-        self.tree.see(target)
-        self.tree.focus_set()
+        self.select_row(target, focus=True)
 
     def _selected(self):
+        """(tote, row index, row) of the selected lid, or Nones."""
         sel = self.tree.selection()
-        if not sel:
-            return None, None
-        i = int(sel[0])
-        return i, self.rows[i]
+        if not sel or sel[0].startswith("t"):
+            return None, None, None
+        tote_id, i = (int(v) for v in sel[0].split(":"))
+        tote = self._tote_by_id(tote_id)
+        if tote is None:
+            return None, None, None
+        return tote, i, tote.rows[i]
 
     def _on_select(self, event=None):
         self.warn_var.set("")
-        i, row = self._selected()
+        tote, i, row = self._selected()
+        if self._armed and (tote is None or self._armed != (tote.id, i)):
+            self._disarm()
         self.swatch.delete("all")
         if row is None:
             for var in (self.d_case, self.d_colour, self.d_engraving, self.d_lid,
@@ -565,29 +704,118 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self.swatch.pack_forget()
         self.d_engraving.set(row.get("engraving") or "")
         self.lid_combo.config(values=list(getattr(self._gen(), "lid_list", [])))
-        self.d_lid.set(self._lid_for(i) or "")
-        self.d_source.set("%s  |  %s  |  %s" % (row.get("product_name") or "",
-                                                row.get("sku") or _("no SKU"), row.get("rule") or ""))
+        self.d_lid.set(self._lid_for(tote, i) or "")
+        self.d_source.set("%s %s  |  %s  |  %s  |  %s" % (
+            tote.noun, tote.scan, row.get("product_name") or "",
+            row.get("sku") or _("no SKU"), row.get("rule") or ""))
         self.d_warnings.set("\n".join(row.get("warnings") or []))
 
     def _on_lid_override(self, event=None):
-        i, row = self._selected()
+        tote, i, row = self._selected()
         if row is None:
             return
         lid = self.d_lid.get()
         if lid:
-            self.lid_override[i] = lid
+            tote.lid_override[i] = lid
+            self._disarm()
             self._refresh_tree()
 
+    def _on_list_key(self, event):
+        if event.char and event.char.isprintable() and not event.state & 0x4:   # not Ctrl
+            text, at = self._typed
+            now = time.monotonic()
+            self._typed = ((text if now - at < SCAN_KEYS_S else "") + event.char, now)
+            return "break"
+
+    def _on_list_return(self, event=None):
+        text, at = self._typed
+        self._typed = ("", 0.0)
+        if text and time.monotonic() - at < SCAN_KEYS_S:
+            self.scan_entry.delete(0, END)
+            self.scan_entry.insert(0, text)
+            return self.scan()
+        return self.engrave_selected()
+
+    # ======================================================= camera, prompt
+    def show_odds(self, odds, best):
+        """The lid camera's odds of each waiting lid ({(tote key, row key): p}),
+        and its best guess, (tote key, row key), selected."""
+        self.odds = dict(odds)
+        self._refresh_tree()
+        tote = self.tote(best[0]) if best else None
+        if tote is not None and best[1] in tote.row_keys:
+            # Into the list only from the scan field or the list itself: never
+            # away from a preview field being typed in.
+            focus = self.focus_get()
+            self.select_row(self._iid(tote, tote.row_keys.index(best[1])),
+                            focus=focus in (None, self.tree, self.scan_entry))
+
+    def set_camera_prompt(self, text, colour="black"):
+        self._camera_prompt = (text, colour) if text else None
+        self._update_prompt()
+
+    def _update_prompt(self):
+        if self._armed:
+            text, colour = _("Check the preview, then press Start Engraving."), "#1F3B57"
+        elif not self.totes:
+            text, colour = _("Scan a tote to list its engravings."), "black"
+        elif self._camera_prompt:
+            text, colour = self._camera_prompt
+        elif not self.waiting():
+            text, colour = _("All open totes are done - scan the next one."), "#1a7f37"
+        else:
+            text, colour = _("Pick the lid in the fixture, then Confirm Lid."), "black"
+        self.prompt_var.set(text)
+        self.prompt_lbl.config(fg=colour)
+
     # ============================================================= engrave
+    def armed(self):
+        return self._armed is not None
+
+    def _disarm(self):
+        if self._armed is not None:
+            self._armed = None
+            self._update_engrave_button()
+            self._update_prompt()
+
+    def _update_engrave_button(self):
+        if self._armed:
+            self.engrave_btn.config(text=_("▶  Start Engraving"), bg="#4CAF50",
+                                    activebackground="#45a049")
+        else:
+            self.engrave_btn.config(text=_("✓  Confirm Lid  ▶"), bg="#2E75B6",
+                                    activebackground="#1F3B57")
+
     def engrave_selected(self, event=None):
-        """Fill the G-code fields from the selected lid and generate its preview."""
-        self.prepare_selected()
+        """The engrave button: the first press shows the selected lid's
+        preview, the second (with the same lid selected) starts it."""
+        tote, i, row = self._selected()
+        if self._armed and tote is not None and self._armed == (tote.id, i):
+            self.start_engraving()
+        elif self.prepare_selected():
+            self._armed = (tote.id, i)
+            self._update_engrave_button()
+            self._update_prompt()
+            self.tree.focus_set()
         return "break"
 
+    def start_engraving(self):
+        page = self._page()
+        multipoint = getattr(page, "multipoint", None) if page is not None else None
+        if self.app.running or (page is not None and page.busy()):
+            self._warn(_("The machine is running - wait for it to finish."))
+            return
+        self._disarm()
+        if multipoint is None:
+            self._status(_("Ready - press Align & Run."))
+            return
+        # A look at the bed still in flight finishes before probing starts.
+        self.lidcam.when_idle(multipoint.quick_align_run)
+
     def prepare_selected(self):
-        """engrave_selected, saying whether the G-code is ready to run."""
-        i, row = self._selected()
+        """Fill the G-code fields from the selected lid and generate its
+        preview, saying whether the G-code is ready to run."""
+        tote, i, row = self._selected()
         if row is None:
             self._warn(_("Select a case first."))
             return False
@@ -598,28 +826,30 @@ class EngravingFrame(CNCRibbon.PageFrame):
         if not ES.has_engraving(row):
             self._warn(_("This item has no Lid Engraving text."))
             return False
-        lid = self._lid_for(i)
+        lid = self._lid_for(tote, i)
         if not lid:
             self._warn(_("This case type is not mapped to any Lid. Pick one from the Lid dropdown."))
             return False
-        key = self.row_keys[i]
-        # A photo just taken and not confirmed showed this lid: it teaches the
-        # camera even when the lid was picked here by hand.
-        self.lidcam.note_engraving(i)
-        if key in self._completed() and not messagebox.askyesno(
+        key = tote.row_keys[i]
+        if key in self._completed(tote) and not messagebox.askyesno(
                 _("Already Engraved"),
                 _("This lid is already marked as engraved.\n\nEngrave it again?"), parent=self):
             return False
+        # A photo of the lid on the bed teaches the camera that it is this
+        # lid, whether the camera picked it or the engraver did.
+        self.lidcam.note_engraving(tote, i)
 
         text = str(row.get("engraving"))
         gen = self._gen()
         gen.engraveText.set(text)
         gen.lidName.set(lid)
         gen._apply_defaults_to_main_fields_if_available(lid)
+        # The lid's own photo, faintly under the engraving (none without one)
+        self.lidcam.show_backdrop(lid, gen.get_lid_dimensions())
 
         self.active_job = {
-            "tote_key": self.tote_key, "row_key": key, "row": dict(row), "lid": lid,
-            "scan": self.scan_value, "search_mode": self.search_mode,
+            "tote_key": tote.key, "row_key": key, "row": dict(row), "lid": lid,
+            "scan": tote.scan, "search_mode": tote.mode,
         }
         self.session.touch()
         self.warn_var.set("")
@@ -633,10 +863,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._status(_("GCode generation failed: ") + str(e), error=True)
             return False
         if ok:
-            self._status(_("Ready - check the preview for '%s' on %s, then press Align & Run.")
+            self._status(_("Ready - check the preview for '%s' on %s, then press Start Engraving.")
                          % (text, lid))
+            self.lidcam.show_preview()
             if page is not None:
-                page.show_run()
+                page.see(self.engrave_btn)
         else:
             self._status(_("GCode generation failed - fields imported, not generated."), error=True)
         return bool(ok)
@@ -656,6 +887,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     def on_run_started(self, program):
         """A run is starting. Only a program run of generated G-code can complete a lid."""
+        self._disarm()
         if program and self._generated:
             self._run = {"generated": self._generated, "engraver": self.session.engraver,
                          "started_at": ES.now_utc()}
@@ -686,6 +918,8 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self.session.count += 1
             self.session.touch()
         self._update_stats()
+        # The engraved lid is still on the bed: the camera waits for it to go.
+        self.lidcam.engraved()
 
         if not job:
             self._status(_("✓ Engraving '%s' complete.") % text)
@@ -695,20 +929,18 @@ class EngravingFrame(CNCRibbon.PageFrame):
         LanSync.broadcast_completion(job["tote_key"], job["row_key"])
         if self.active_job is job:
             self.active_job = None
-        if job["tote_key"] == self.tote_key:
-            self._refresh_tree()
+        self._refresh_tree()
 
-        left = len(self._remaining())
+        tote = self.tote(job["tote_key"])
+        left = len(self._remaining(tote)) if tote is not None else 0
+        noun = _("Tote") if job["search_mode"] == "Tote" else _("Order")
         if left:
-            self._select_next()
-            self._status(_("✓ '%s' engraved - %d left. Pick the next case.") % (text, left))
+            self._status(_("✓ '%s' engraved - %d left in %s %s.") % (text, left, noun, job["scan"]))
         else:
-            noun = _("Tote") if job["search_mode"] == "Tote" else _("Order")
-            self._status(_("✓ '%s' engraved - %s %s complete. Scan the next one.")
-                         % (text, noun, job["scan"]))
-        # Always - not just once the tote is done - because this machine may be
-        # about to scan a different tote before the others finish this one.
-        self.focus_scan()
+            self._status(_("✓ '%s' engraved - %s %s complete.") % (text, noun, job["scan"]))
+        # The next lid, in this tote while it has any. Focus goes to the list,
+        # which also takes a barcode scan for the next tote.
+        self._select_next(tote)
 
     # ============================================================ settings
     def show_settings_dialog(self):

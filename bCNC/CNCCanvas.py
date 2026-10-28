@@ -257,6 +257,9 @@ class CNCCanvas(Canvas):
         self.draw_grid = True
         self.draw_lid_outline = True
         self.lid_outline_cords = None
+        self.lid_backdrop = None    # (PIL RGBA image, (width, length) mm) under the lid outline
+        self._lid_rect = None       # the lid outline drawn, (xmin, ymin, xmax, ymax) mm
+        self._lidBackdropTk = None
 
         self.draw_margin = True
         self.draw_probe = True
@@ -889,6 +892,8 @@ class CNCCanvas(Canvas):
         if self._probe:
             self._projectProbeImage()
             self.itemconfig(self._probe, image=self._probeTkImage)
+        if self.lid_backdrop:
+            self._drawLidBackdrop()
         self.cameraUpdate()
 
     # ----------------------------------------------------------------------
@@ -1653,7 +1658,9 @@ class CNCCanvas(Canvas):
         corner2: (x1, y1) in mm
         """
         self.delete("LidOutline")
+        self._lid_rect = None
         if not self.draw_lid_outline:
+            self._drawLidBackdrop()
             return
         
         # Determine corner coordinates
@@ -1668,6 +1675,7 @@ class CNCCanvas(Canvas):
                 if width is not None and height is not None:
                     corner1, corner2 = (0, 0), (width, -height)
                 else:
+                    self._drawLidBackdrop()
                     return  # No valid dimensions available
             else:
                 return  # GenGcodeFrame not available
@@ -1697,6 +1705,44 @@ class CNCCanvas(Canvas):
                 dash=(8, 2)
             )
             self.tag_raise(item)
+        self._lid_rect = (xmin, ymin, xmax, ymax)
+        self._drawLidBackdrop()
+
+    # ----------------------------------------------------------------------
+    # A faint photo of the lid under the engraving (the lid camera's)
+    # ----------------------------------------------------------------------
+    LID_BACKDROP_OPACITY = 0.35
+    LID_BACKDROP_MAX_PX = 6000000   # zoomed in further, it is left out
+
+    def setLidBackdrop(self, image, size_mm):
+        """Show `image` (PIL RGBA, covering a lid frame of `size_mm` = (width,
+        length)) faintly inside the lid outline, or nothing if None. It is
+        drawn only while the outline is that size, so it never shows under
+        another lid."""
+        self.lid_backdrop = (image, tuple(size_mm)) if image is not None else None
+        self._drawLidBackdrop()
+
+    def _drawLidBackdrop(self):
+        self.delete("LidBackdrop")
+        self._lidBackdropTk = None
+        rect = self._lid_rect
+        if not self.lid_backdrop or rect is None or self.view != VIEW_XY or RESAMPLE is None:
+            return
+        image, (width, length) = self.lid_backdrop
+        xmin, ymin, xmax, ymax = rect
+        if abs((xmax - xmin) - width) > 0.5 or abs((ymax - ymin) - length) > 0.5:
+            return
+        (x0, y0), (x1, y1) = self.plotCoords([(xmin, ymax, 0.0), (xmax, ymin, 0.0)])
+        w, h = int(round(x1 - x0)), int(round(y1 - y0))
+        if w < 2 or h < 2 or w * h > self.LID_BACKDROP_MAX_PX:
+            return
+        bg = tuple(c >> 8 for c in self.winfo_rgb(self.cget("background")))
+        plain = Image.new("RGBA", (w, h), bg + (255,))
+        lid = Image.alpha_composite(plain, image.resize((w, h), Image.BILINEAR))
+        faded = Image.blend(plain, lid, self.LID_BACKDROP_OPACITY).convert("RGB")
+        self._lidBackdropTk = ImageTk.PhotoImage(faded)
+        item = self.create_image(x0, y0, image=self._lidBackdropTk, anchor="nw", tag="LidBackdrop")
+        self.tag_lower(item)
 
     # ----------------------------------------------------------------------
     # Display orientation markers

@@ -155,6 +155,7 @@ class Result:
         self.ppm = None             # its pixels per mm
         self.valid = None           # which pixels of `rectified` the camera saw
         self.lid_outline = None     # the lid's box in photo pixels (4x2), for labelling
+        self.in_corner = None       # the lid is in the fixture's corner (None: no corner to check)
 
     @property
     def best(self):
@@ -652,6 +653,40 @@ def snap_to_corner(lid, corner, region, ppm, valid):
     out = Lid((dims[0], dims[1]), (float(centre[0]) / ppm, float(centre[1]) / ppm), lid.angle,
               mask, new_box, lid.method)
     return out, True
+
+
+def flat_lid(res, corner=None):
+    """The lid laid flat, cut out of the white-balanced view: columns run
+    across it from the fence side, rows along it from the corner end, at
+    `res.ppm` pixels per mm. Its corner end is the one in the fixture's corner
+    (`corner`), else the one nearest the photo's upper left. Pixels the camera
+    did not see take the lid's median colour. None without a lid."""
+    if res.lid is None or res.rectified is None:
+        return None
+    box = res.lid.box_px.astype(np.float64)
+    if corner is not None and res.plane is not None and corner.ref == res.plane.ref:
+        c = (corner.corner - [res.region[0], res.region[1]]) * res.ppm
+        k = int(np.argmin(np.linalg.norm(box - c, axis=1)))
+    elif res.lid_outline is not None:
+        img = np.asarray(res.lid_outline, np.float64)
+        k = int(np.argmin(img[:, 0] + img[:, 1]))
+    else:
+        k = int(np.argmin(box[:, 0] + box[:, 1]))
+    o = box[k]
+    a, b = box[(k + 1) % 4] - o, box[(k - 1) % 4] - o
+    along, across = (a, b) if np.linalg.norm(a) >= np.linalg.norm(b) else (b, a)
+    w = max(1, int(round(np.linalg.norm(across))))
+    h = max(1, int(round(np.linalg.norm(along))))
+    A = cv.getAffineTransform(np.float32([o, o + across, o + along]),
+                              np.float32([[0, 0], [w, 0], [0, h]]))
+    flat = cv.warpAffine(res.rectified, A, (w, h), flags=cv.INTER_LINEAR,
+                         borderMode=cv.BORDER_CONSTANT)
+    seen = res.valid if res.valid is not None else np.full(res.rectified.shape[:2], 255, np.uint8)
+    seen = cv.warpAffine(seen, A, (w, h), flags=cv.INTER_NEAREST)
+    seen[flat.max(axis=2) == 0] = 0
+    if seen.any():
+        flat[seen == 0] = np.median(flat[seen > 0], axis=0).astype(np.uint8)
+    return flat
 
 
 # --------------------------------------------- edges, from the fixture corner
@@ -1304,6 +1339,7 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
             lid = lid_from_corner_edges(corner_edges(img, plane, corner, min_width, max_width),
                                         corner, region, ppm, valid, view.shape)
             if lid is not None:
+                res.in_corner = True
                 res.warnings.append("Found by its edges only: check the outline.")
         if lid is None:
             res.warnings.append("No lid found on the bed.")
@@ -1315,6 +1351,7 @@ def identify(jpeg_or_img, candidates, reference_colour, marker_mm=DEFAULT_MARKER
                                         % corner.ref)
                 else:
                     lid, in_corner = snap_to_corner(lid, corner, region, ppm, valid)
+                    res.in_corner = in_corner
                     if not in_corner:
                         res.warnings.append("The lid is not in the fixture's corner: measured "
                                             "on its own.")

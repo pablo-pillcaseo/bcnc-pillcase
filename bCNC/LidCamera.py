@@ -1,26 +1,29 @@
-"""Lid camera for Tote Scanning: photograph the bed, pick the lid, confirm.
+"""Lid camera for Tote Scanning: see the lid placed in the fixture, pick it in
+the list, and show it under its engraving.
 
-After a tote is scanned (or on "Identify Lid"), the camera on the BLTouch board
-takes a photo of the work area. LidVision finds and measures the lid, and
-LidMatch gives the odds of each lid waiting to be engraved (the candidate
-pool, below). A dialog shows the photo and every waiting lid, likeliest first.
-The operator confirms, which starts the engraving (Engrave Selected, then
-Align & Run), or picks another, or retakes the photo.
+While lids are waiting to be engraved and the machine is idle, the camera on
+the BLTouch board looks at the bed every couple of seconds. A lid that appears
+and holds still for two looks is identified: LidVision finds and measures it,
+and LidMatch gives the odds of each lid waiting in the open totes (the
+candidates, below). The likeliest is selected in Tote Scanning's list, the odds
+are shown beside the lids, and the photo takes the place of the G-code view
+until the engraver confirms. The engraver confirms it there, or picks another
+lid; the preview then shows the engraving over a faint photo of this very lid.
+After the engraving the camera waits for the lid to be taken off before it
+looks for the next.
 
-Every confirmation teaches the camera (LidLearn): the lid's photo and crop are
-kept as a named lid, labelled by the scan-verified order, and the bare fixture
-round it updates the empty-bed map. A lid engraved by hand soon after a photo
-teaches it too, so a correction made outside the dialog is not lost.
+Every engraving started from a photo teaches the camera (LidLearn): the lid's
+photo and crop are kept as a named lid, labelled with the lid the engraver
+confirmed, and the bare fixture round it updates the empty-bed map.
 
-The candidate pool. Today it is the tote on show. It can also be every order
-scanned on this station that still has lids waiting (setting "candidates"),
-and it is built so that a single scanning point can later feed it every
-scanned order: picking a lid from another order loads that order and selects
-its row.
+The candidates are the lids still to engrave in every open tote (Tote
+Scanning keeps several open at once), so a lid from any of them may be placed;
+a lid engraved on another station drops out through the shared progress.
 
 Nothing here can delay probing:
-  * No photo is taken while the machine runs, Align & Run is probing, or Auto
-    Setup is working. The check is made before each photo.
+  * No photo is taken while the machine runs, Align & Run is probing, Auto
+    Setup is working, or a preview waits to be started. The check is made
+    before each photo, and Start Engraving waits for a photo in flight.
   * The capture and the vision run on a worker thread. The Tk thread only
     polls for the result, so the window never freezes either.
   * The capture shares the probe port's lock with the servo commands (see
@@ -37,19 +40,22 @@ Per-machine files, next to the bCNC ini:
   <ini>-lidcam-models/                the image network, once fetched
 """
 
+import atexit
 import json
 import os
 import shutil
 import threading
 import time
+import tkinter as tk
 from tkinter import (
-    BOTH, BOTTOM, END, LEFT, RIGHT, TOP, W, X, Y, YES,
-    BooleanVar, Button, Checkbutton, Entry, Frame, Label, LabelFrame, Radiobutton,
-    Scrollbar, StringVar, Text, Toplevel, messagebox, ttk,
+    BOTH, BOTTOM, END, LEFT, RIGHT, TOP, W, X, YES,
+    BooleanVar, Button, Checkbutton, Entry, Frame, Label, LabelFrame,
+    StringVar, Text, Toplevel, messagebox, ttk,
 )
 
+import numpy as np
+
 import BltCamera
-import EngravingSession as ES
 import LidLearn
 import LidMatch
 import LidVision
@@ -59,18 +65,24 @@ from Utils import _
 
 _SECTION = "LidCamera"
 POLL_MS = 100
-PREVIEW_WIDTH = 640
 
-# Below this a confirm asks twice: the camera is not sure, so the operator
-# should be.
-LOW_CONFIDENCE = 0.5
-# A lid engraved by hand within this long of a photo is taken as what the
-# photo showed, and teaches the camera.
+# Between looks at the bed: waiting for a lid, or for one to be taken off...
+WATCH_MS = 1500
+# ...and while an identified lid sits there (to notice it being swapped).
+SEEN_MS = 3000
+# After the camera fails (unplugged, say), before it tries again.
+RETRY_MS = 15000
+# Two looks agree on a lid when they put it this close, at this size...
+SAME_MM = 4.0
+# ...and this close in colour (in LidVision.COLOUR_SIGMA).
+SAME_COLOUR = 4.0
+# A photo stays the lid on the bed (and teaches the camera) this long.
 TEACH_BY_HAND_S = 300
-# Orders kept in the pool with lids waiting, at most this long after scanning.
-ORDER_KEEP_H = 24
 # Where the teaching tool (tools/lidcam_learn.py) keeps its lids.
 TEACHING_DIR = os.path.expanduser("~/lidcam")
+# Where the fixture corner falls in the preview, for the photo under it.
+BACKDROP_CORNERS = ("top left", "top right", "bottom left", "bottom right")
+BACKDROP_PPM = 8.0
 
 
 def _path(suffix):
@@ -81,14 +93,18 @@ def enabled():
     return Utils.getBool(_SECTION, "enabled", True)
 
 
-def auto_after_scan():
-    return Utils.getBool(_SECTION, "autoAfterScan", True)
+def watching():
+    """Look for a lid being placed, or only when Look Again is pressed."""
+    return Utils.getBool(_SECTION, "watch", True)
 
 
-def candidate_scope():
-    """'tote': the tote on show; 'all': every order scanned here with lids waiting."""
-    v = Utils.getStr(_SECTION, "candidates", "tote")
-    return v if v in ("tote", "all") else "tote"
+def backdrop_on():
+    return Utils.getBool(_SECTION, "backdrop", True)
+
+
+def backdrop_corner():
+    v = Utils.getStr(_SECTION, "backdropCorner", "top left")
+    return v if v in BACKDROP_CORNERS else "top left"
 
 
 def marker_mm():
@@ -141,67 +157,85 @@ def model_path():
     return None
 
 
+# ------------------------------------------------------------- the lid seen
+def lid_place(res):
+    """Where a look put the lid, to compare looks: centre (marker mm), size
+    and colour. None without a lid - or with one outside the fixture's
+    corner, where lids are never placed: the edge search finding something
+    in the clutter of an empty bed."""
+    if res.lid is None or res.region is None or res.in_corner is False:
+        return None
+    cx, cy = res.lid.centre_mm
+    return {"centre": (cx + res.region[0], cy + res.region[1]), "size": res.lid.size_mm,
+            "colour": res.colour}
+
+
+def same_lid(a, b):
+    """Two looks saw the same lid, in the same place."""
+    if a is None or b is None:
+        return False
+    if np.hypot(a["centre"][0] - b["centre"][0], a["centre"][1] - b["centre"][1]) > SAME_MM:
+        return False
+    if max(abs(x - y) for x, y in zip(a["size"], b["size"])) > SAME_MM:
+        return False
+    if a["colour"] is not None and b["colour"] is not None:
+        if LidVision.colour_distance(a["colour"], b["colour"]) > SAME_COLOUR * LidVision.COLOUR_SIGMA:
+            return False
+    return True
+
+
+def backdrop_image(flat, ppm, length_is_min, frame_mm, corner_at, out_ppm=BACKDROP_PPM):
+    """The flat lid (LidVision.flat_lid, at `ppm`) placed on its engraving
+    frame (`frame_mm` = (width, length), the preview's X and Y): to scale,
+    from the fixture corner, which is at the frame's `corner_at`. A lid
+    larger than the frame is cut to it; where it is smaller the frame stays
+    clear. -> RGBA array, `out_ppm` pixels per mm."""
+    import cv2 as cv
+    fw, fl = (max(1, int(round(v * out_ppm))) for v in frame_mm)
+    k = out_ppm / ppm
+    lid = cv.resize(flat, (max(1, int(round(flat.shape[1] * k))), max(1, int(round(flat.shape[0] * k)))),
+                    interpolation=cv.INTER_CUBIC)
+    lid = cv.cvtColor(lid, cv.COLOR_BGR2RGB)
+    if length_is_min and lid.shape[0] < fl:
+        # It ran off the camera's view: the rest of it is the same lid.
+        fill = np.median(lid.reshape(-1, 3), axis=0).astype(np.uint8)
+        lid = np.vstack([lid, np.tile(fill, (fl - lid.shape[0], lid.shape[1], 1))])
+    h, w = min(lid.shape[0], fl), min(lid.shape[1], fw)
+    part = lid[:h, :w]
+    x0 = y0 = 0
+    if "right" in corner_at:
+        part, x0 = part[:, ::-1], fw - w
+    if "bottom" in corner_at:
+        part, y0 = part[::-1], fl - h
+    out = np.zeros((fl, fw, 4), np.uint8)
+    out[y0:y0 + h, x0:x0 + w, :3] = part
+    out[y0:y0 + h, x0:x0 + w, 3] = 255
+    return out
+
+
 # ------------------------------------------------------------ the pool
-class CandidatePool:
-    """The lids waiting to be engraved that the camera chooses among.
-
-    Orders come in as they are scanned (`add_order`). The tote on show is
-    always in; with scope 'all', so is every other order scanned here within
-    ORDER_KEEP_H that still has lids waiting. Which lids are waiting comes from
-    the shared progress store, so a lid engraved on another station drops out.
-    """
-
-    def __init__(self, frame):
-        self.frame = frame
-        self.orders = {}            # tote_key -> {"scan", "mode", "rows", "row_keys", "added"}
-
-    def add_order(self, tote_key, scan, mode, rows, row_keys):
-        if tote_key:
-            self.orders[tote_key] = {"scan": scan, "mode": mode, "rows": list(rows),
-                                     "row_keys": list(row_keys), "added": time.time()}
-
-    def order(self, tote_key):
-        return self.orders.get(tote_key)
-
-    def _lid_defaults(self):
-        gen = self.frame._gen()
-        if not hasattr(gen, "_lid_defaults"):
-            gen._lid_defaults = gen._load_lid_defaults()
-        return gen._lid_defaults
-
-    def candidates(self, scope):
-        f = self.frame
-        defaults = self._lid_defaults()
-        now = time.time()
-        keys = [f.tote_key] if f.tote_key else []
-        if scope == "all":
-            keys += [k for k, o in self.orders.items()
-                     if k != f.tote_key and now - o["added"] < ORDER_KEEP_H * 3600]
-        out = []
-        for tk in keys:
-            current = tk == f.tote_key
-            o = {"scan": f.scan_value, "mode": f.search_mode, "rows": f.rows,
-                 "row_keys": f.row_keys} if current else self.orders[tk]
-            done = f.progress.completed(tk)
-            for i, row in enumerate(o["rows"]):
-                if not ES.has_engraving(row) or o["row_keys"][i] in done:
-                    continue
-                if current:
-                    lid = f._lid_for(i)
-                else:
-                    hits = PillcaseOrder.lids_for_product(defaults, row.get("product_code"))
-                    lid = hits[0] if hits else None
-                out.append({
-                    "key": "%s|%s" % (tk, o["row_keys"][i]),
-                    # The lid as it is, not its engraving frame (see lid_outline).
-                    "size": PillcaseOrder.lid_outline(defaults.get(lid)) if lid else None,
-                    "colour_key": (row.get("colour_code") or "").upper(),
-                    "lid": lid, "row": row, "row_index": i, "row_key": o["row_keys"][i],
-                    "tote_key": tk, "scan": o["scan"], "mode": o["mode"], "current": current,
-                })
-        # The tote on show first: among lids that look alike, its rows lead.
-        out.sort(key=lambda c: not c["current"])
-        return out
+def candidates(frame):
+    """The lids waiting to be engraved, in every open tote: the camera chooses
+    among these. The tote being worked on leads, so among lids that look
+    alike its rows come first; then the newest."""
+    gen = frame._gen()
+    if not hasattr(gen, "_lid_defaults"):
+        gen._lid_defaults = gen._load_lid_defaults()
+    defaults = gen._lid_defaults
+    focus = frame.focus_tote()
+    out = []
+    for tote, i in sorted(frame.waiting(), key=lambda ti: ti[0] is not focus):
+        row = tote.rows[i]
+        lid = frame._lid_for(tote, i)
+        out.append({
+            "key": "%s|%s" % (tote.key, tote.row_keys[i]),
+            # The lid as it is, not its engraving frame (see lid_outline).
+            "size": PillcaseOrder.lid_outline(defaults.get(lid)) if lid else None,
+            "colour_key": (row.get("colour_code") or "").upper(),
+            "lid": lid, "row": row, "row_index": i, "row_key": tote.row_keys[i],
+            "tote_key": tote.key, "scan": tote.scan, "mode": tote.mode,
+        })
+    return out
 
 
 class Learning:
@@ -228,23 +262,108 @@ class Learning:
         return [e for e in self.store.examples if e.features is not None]
 
 
+# ========================================================= the camera view
+class CameraView:
+    """The camera's photo, in place of bCNC's G-code view: laid over that
+    canvas, so the one view shows the lid on the bed until it is confirmed,
+    then its engraving. A click on it shows the G-code view again."""
+
+    def __init__(self, app):
+        self.app = app
+        self.cv = None
+        self.bgr = None
+        self.caption = ("", "white")
+        self._photo = None
+
+    def _target(self):
+        return getattr(getattr(self.app, "canvasFrame", None), "canvas", None)
+
+    def show(self, bgr, caption, colour="white"):
+        target = self._target()
+        if target is None or bgr is None:
+            return
+        if self.cv is None:
+            self.cv = tk.Canvas(target.master, highlightthickness=0, background="#1e1e1e",
+                                cursor="hand2")
+            self.cv.bind("<Configure>", lambda e: self._render())
+            self.cv.bind("<Button-1>", lambda e: self.hide())
+        self.bgr, self.caption = bgr, (caption, colour)
+        self.cv.place(in_=target, x=0, y=0, relwidth=1, relheight=1)
+        # Canvas.lift raises canvas items: the window itself is raised here.
+        self.cv.tk.call("raise", self.cv._w, target._w)
+        self._render()
+
+    def hide(self):
+        if self.cv is not None:
+            self.cv.place_forget()
+
+    def shown(self):
+        return self.cv is not None and self.cv.winfo_manager() == "place"
+
+    def _render(self):
+        cv_ = self.cv
+        if cv_ is None or self.bgr is None:
+            return
+        w, h = cv_.winfo_width(), cv_.winfo_height()
+        if w < 20 or h < 20:
+            return
+        try:
+            import cv2 as cv
+            from PIL import Image, ImageTk
+        except ImportError:
+            return
+        cv_.delete("all")
+        text, colour = self.caption
+        top = cv_.create_text(10, 6, text=text, anchor="nw", fill=colour,
+                              font=("", 13, "bold"), width=w - 20)
+        foot = cv_.create_text(w - 10, h - 4, anchor="se", fill="#9a9a9a", font=("", 9),
+                               text=_("Lid camera  ·  click for the G-code view"))
+        y0 = cv_.bbox(top)[3] + 6
+        y1 = cv_.bbox(foot)[1] - 4
+        ih, iw = self.bgr.shape[:2]
+        k = min(w / float(iw), (y1 - y0) / float(ih))
+        if k > 0:
+            small = cv.resize(self.bgr, (max(1, int(iw * k)), max(1, int(ih * k))),
+                              interpolation=cv.INTER_AREA)
+            self._photo = ImageTk.PhotoImage(Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB)))
+            cv_.create_image(w // 2, (y0 + y1) // 2, image=self._photo)
+
+
 # ========================================================== the controller
 class Controller:
-    """The camera side of an EngravingFrame (`frame`)."""
+    """The camera side of an EngravingFrame (`frame`).
+
+    It watches in one of two states: "empty", waiting for a lid to be placed,
+    and "on", a lid on the bed - identified, or just engraved - waiting for it
+    to be taken off or swapped.
+    """
 
     def __init__(self, frame):
         self.frame = frame
         self.app = frame.app
         self.colours = LidVision.ColourMemory(_path("colours.json"))
-        self.pool = CandidatePool(frame)
+        self.view = CameraView(self.app)
         self._thumb_colours = {}
         self._job = None            # worker in flight: {"thread", "result", "error", "done"}
-        self._dialog = None
         self._learning = None       # Learning, once loaded
         self._learning_lock = threading.Lock()
         self._bed = None            # the empty-bed map in use (swapped whole when changed)
         self._bed_loaded = False
-        self._last = None           # the last photo's outcome, until taught or replaced
+        self._last = None           # the identified lid's outcome, until taken off
+        self.state = "empty"
+        self._prev = None           # the previous look's lid_place
+        self._on = None             # lid_place of the lid on the bed ("on")
+        self._empty_looks = 0
+        self._retry_at = 0.0
+        self._idle_waiters = []
+        frame.after(WATCH_MS, self._tick)
+        # A look still running in OpenCV when Python exits aborts the process.
+        atexit.register(self._finish_look)
+
+    def _finish_look(self, limit_s=10.0):
+        job, t0 = self._job, time.time()
+        while job is not None and not job["done"] and time.time() - t0 < limit_s:
+            time.sleep(0.05)
 
     # ============================================================ guards
     def why_not(self):
@@ -269,6 +388,13 @@ class Controller:
             return _("A photo is already being taken.")
         return None
 
+    def when_idle(self, fn):
+        """Call `fn` once no photo is being taken (now, if none is)."""
+        if self._job is None:
+            fn()
+        else:
+            self._idle_waiters.append(fn)
+
     # ===================================================== taking a photo
     def _start(self, work, on_done, on_error):
         """Run `work()` on a worker thread; call back on the Tk thread."""
@@ -286,10 +412,15 @@ class Controller:
                 self.frame.after(POLL_MS, poll)
                 return
             self._job = None
-            if job["error"] is not None:
-                on_error(job["error"])
-            else:
-                on_done(job["result"])
+            try:
+                if job["error"] is not None:
+                    on_error(job["error"])
+                else:
+                    on_done(job["result"])
+            finally:
+                waiters, self._idle_waiters = self._idle_waiters, []
+                for fn in waiters:
+                    fn()
 
         self._job = job
         threading.Thread(target=run, daemon=True).start()
@@ -329,15 +460,6 @@ class Controller:
             bed.save(_path("bedmap"))
         self._bed, self._bed_loaded = bed, True
 
-    # ========================================================= candidates
-    def note_order(self):
-        """The frame just loaded an order: it joins the pool."""
-        f = self.frame
-        self.pool.add_order(f.tote_key, f.scan_value, f.search_mode, f.rows, f.row_keys)
-
-    def _candidates(self):
-        return self.pool.candidates(candidate_scope())
-
     def _reference_colour(self, code, colour_name=None):
         """How a colour should look when it has no named lids: learned from
         this camera's confirmations, else the colour's thumbnail."""
@@ -351,75 +473,184 @@ class Controller:
             self._thumb_colours[code] = LidVision.colour_of_thumbnail(path) if path else None
         return self._thumb_colours[code]
 
-    # ============================================================ identify
-    def after_scan(self):
-        """A tote was just listed: identify its lid if set up to, quietly."""
-        if not (enabled() and auto_after_scan()):
-            return
-        if not self._candidates():
-            return
-        if self.app.blt_serial is None or self.app.blt_has_camera is False:
-            return      # no camera here: scanning works exactly as before
-        if self.why_not() is None:
-            self.identify(auto=True)
+    # ============================================================ watching
+    def _tick(self):
+        delay = WATCH_MS
+        try:
+            delay = self._watch()
+        except Exception as e:
+            print("[lidcam] watch error:", repr(e))
+        self.frame.after(delay, self._tick)
 
-    def identify(self, auto=False):
+    def _watch(self):
+        """One step of watching the bed; returns when to step again (ms)."""
+        f = self.frame
+        if not (enabled() and watching()) or self._job is not None:
+            return WATCH_MS
+        if self.app.blt_serial is None or self.app.blt_has_camera is False \
+                or not LidVision.available():
+            return WATCH_MS     # no camera here: Tote Scanning works as before
+        if not f.session.logged_in or f.armed() or time.time() < self._retry_at:
+            return WATCH_MS
+        if self.state == "empty" and not f.waiting():
+            return WATCH_MS
+        if self.why_not() is not None:
+            return WATCH_MS
+        self.look()
+        return SEEN_MS if self.state == "on" and self._last is not None else WATCH_MS
+
+    def totes_changed(self):
+        """Totes were opened or closed: odds for lids no longer waiting go."""
+        if self._last is not None and self.state == "on":
+            self._present(self._last, rematch=True)
+        elif not self.frame.waiting():
+            self.frame.set_camera_prompt(None)
+
+    def engraved(self):
+        """The lid on the bed was just engraved: wait for it to be taken off."""
+        self.state = "on"
+        self._last = None
+        self._empty_looks = 0
+        self.frame.show_odds({}, None)
+        if enabled():
+            self.frame.set_camera_prompt(_("Take the engraved lid off, and place the next."))
+
+    # ============================================================== a look
+    def look(self, force=False):
+        """Take a photo and act on it. `force`: identify whatever is there,
+        as asked for by Look Again."""
+        f = self.frame
         reason = self.why_not()
         if reason:
-            if not auto:
-                self.frame._warn(reason)
+            if force:
+                f._warn(reason)
             return
-        candidates = self._candidates()
-        if not candidates:
-            if not auto:
-                self.frame._warn(_("Scan a tote first - there are no lids waiting to match."))
+        if force and not f.waiting():
+            f._warn(_("Scan a tote first - there are no lids waiting to match."))
             return
-        self.frame._status(_("📷 Looking at the bed..."))
         bed, corner = self.bed(), load_corner()
         mm, scale = marker_mm(), size_scale()
-        # Looked up here, on the Tk thread: the worker touches no config or rows.
-        refs = {}
-        for c in candidates:
-            if c["colour_key"] not in refs:
-                refs[c["colour_key"]] = self._reference_colour(c["colour_key"],
-                                                               c["row"].get("colour_name"))
+        if force:
+            f._status(_("📷 Looking at the bed..."))
 
         def work():
             shot = self._photo()
-            return self._analyse(shot, candidates, refs, bed, corner, mm, scale)
+            res = LidVision.identify(shot.jpeg, LidMatch.detection_candidates(), lambda k: None,
+                                     mm, scale, bed, corner)
+            return shot, res
 
         def failed(e):
+            self._retry_at = time.time() + RETRY_MS / 1000.0
             msg = _("Lid camera: %s") % e
-            if auto:
-                # A scan must never be held up by the camera.
-                self.frame._status(msg)
-            else:
-                self.frame._status(msg, error=True)
-                self.frame._warn(msg)
+            f._status(msg, error=force)
+            if force:
+                f._warn(msg)
 
-        self._start(work, lambda out: self._show(out, auto), failed)
+        self._start(work, lambda out: self._looked(out[0], out[1], force, bed), failed)
 
-    def _analyse(self, shot, candidates, refs, bed, corner, mm, scale):
-        """Worker thread: find the lid, describe it, and give the odds."""
+    def _looked(self, shot, res, force, bed):
+        """What a look saw, on the Tk thread: a lid placed, taken off, swapped."""
+        place = lid_place(res)
+        prev, self._prev = self._prev, place
+        if force:
+            self._identify(shot, res, bed, place)
+            return
+        if place is None:
+            self._empty_looks += 1
+            if self.state == "on" and self._empty_looks >= 2:
+                self._taken_off()
+            return
+        self._empty_looks = 0
+        # A lid, still for two looks, that is not the one already on the bed
+        if same_lid(place, prev) and not (self.state == "on" and same_lid(place, self._on)):
+            self._identify(shot, res, bed, place)
+
+    def _taken_off(self):
+        self.state, self._on, self._last = "empty", None, None
+        self.frame.show_odds({}, None)
+        self.view.hide()
+        self.frame.set_camera_prompt(_("📷 Place a lid in the fixture.") if self.frame.waiting()
+                                     else None)
+
+    def _identify(self, shot, res, bed, place):
+        """The lid on the bed is new: give the odds of each waiting lid."""
+        cands = candidates(self.frame)
+        refs = {}
+        for c in cands:
+            if c["colour_key"] not in refs:
+                refs[c["colour_key"]] = self._reference_colour(c["colour_key"],
+                                                               c["row"].get("colour_name"))
+        self.state, self._on = ("on", place) if place is not None else ("empty", None)
+        self._start(lambda: self._analyse(shot, res, cands, refs, bed),
+                    self._present,
+                    lambda e: self.frame._status(_("Lid camera: %s") % e, error=True))
+
+    def _analyse(self, shot, res, cands, refs, bed):
+        """Worker thread: describe the lid found, and give the odds."""
         L = self.learning()
-        res = LidVision.identify(shot.jpeg, LidMatch.detection_candidates(), lambda k: None,
-                                 mm, scale, bed, corner)
         crop = mask = feats = None
         if res.lid is not None:
             crop, mask = LidLearn.lid_crop(res.rectified, res.lid, res.ppm)
             feats = LidLearn.features(crop, mask, L.network)
+        out = {"shot": shot, "res": res, "crop": crop, "mask": mask, "feats": feats,
+               "candidates": cands, "refs": refs, "time": time.time(), "taught": False,
+               "empty_bed": bed is not None}
+        self._match(out)
+        return out
+
+    def _match(self, out):
+        """The odds of out's candidates (any thread)."""
+        L = self.learning()
         with L.lock:
             examples = list(L.store.examples)
             usable = [e for e in examples if e.features is not None]
             memory = LidLearn.Memory(usable, L.outlines, L.pair_cache)
             learned = L.trainer.get(usable)
             method, hit = LidMatch.best_colour_method(examples, L.network)
-            match = LidMatch.match(res, candidates, feats, memory, learned, examples,
-                                   refs.get, method, hit)
-            guesses = LidLearn.guesses(memory, feats, res.lid, learned)
-        return {"shot": shot, "res": res, "match": match, "crop": crop, "mask": mask,
-                "feats": feats, "guesses": guesses, "time": time.time(), "taught": False,
-                "empty_bed": bed is not None}
+            out["match"] = LidMatch.match(out["res"], out["candidates"], out["feats"], memory,
+                                          learned, examples, out["refs"].get, method, hit)
+            out["guesses"] = LidLearn.guesses(memory, out["feats"], out["res"].lid, learned)
+
+    def _present(self, out, rematch=False):
+        """Show what the camera made of the lid: the odds in the list, its
+        best guess selected, the photo in place of the G-code view."""
+        f = self.frame
+        if rematch:
+            # The waiting lids changed under the photo: the odds again, quickly
+            out["candidates"] = [c for c in candidates(f)]
+            self._match(out)
+        self._last = out
+        res, match = out["res"], out["match"]
+        best = match.best
+        warnings = res.warnings + match.warnings
+        if res.lid is None or best is None:
+            f.show_odds({}, None)
+            text = _("📷 No lid found.") if res.lid is None else _("📷 Nothing waiting matches.")
+            f.set_camera_prompt(text + " " + " ".join(warnings), "#b26b00")
+            self.view.show(res.annotated, text, "#ffcc66")
+            return
+        odds = {}
+        for gm in match.groups:
+            for c in gm.group.members:
+                odds[(c["tote_key"], c["row_key"])] = gm.probability
+        member = best.group.first
+        f.show_odds(odds, (member["tote_key"], member["row_key"]))
+        p = best.probability
+        colour = "#1a7f37" if p >= 0.8 else "#b26b00" if p >= 0.5 else "red"
+        noun = _("Tote") if member["mode"] == "Tote" else _("Order")
+        row = member["row"]
+        lid = "%s, %s" % (row.get("colour_name") or best.group.colour,
+                          row.get("case_type") or member["lid"] or "?")
+        f.set_camera_prompt(_("📷 %s - %d%% sure, %s %s. Confirm Lid, or pick another.")
+                            % (lid, round(100 * p), noun, member["scan"]), colour)
+        if warnings:
+            f.warn_var.set("\n".join(warnings))
+        self.view.show(res.annotated, _("%s  ·  %d%% sure  ·  %s %s  ·  '%s'") % (
+            lid, round(100 * p), noun, member["scan"], row.get("engraving") or ""),
+            {"#1a7f37": "#7ee787", "#b26b00": "#ffcc66"}.get(colour, "#ff7b72"))
+        if not rematch:
+            f._status(_("📷 Looks like %s - %d%% sure.") % (LidMatch.describe_group(best.group),
+                                                            round(100 * p)))
 
     # ============================================================ teaching
     def _teach(self, out, shape, colour, lid_name, tote_key=None, row_key=None):
@@ -447,279 +678,50 @@ class Controller:
         if colour and res.colour is not None and res.lid is not None:
             self.colours.learn(colour, res.colour)
 
-    def note_engraving(self, i):
-        """The frame is about to engrave row `i`, picked by hand: if a photo
-        was taken just before and not confirmed, it showed this lid."""
+    def _fresh(self):
+        """The identified lid still on the bed, if it was found."""
         out = self._last
-        if out is None or out.get("taught") or time.time() - out["time"] > TEACH_BY_HAND_S:
+        if out is None or out["res"].lid is None or time.time() - out["time"] > TEACH_BY_HAND_S:
+            return None
+        return out
+
+    def note_engraving(self, tote, i):
+        """The frame is about to engrave row `i` of `tote`, confirmed by the
+        engraver: the lid on the bed is that lid."""
+        out = self._fresh()
+        if out is None or out.get("taught"):
             return
-        f = self.frame
-        row = f.rows[i]
-        lid = f._lid_for(i)
-        size = PillcaseOrder.lid_outline(self.pool._lid_defaults().get(lid)) if lid else None
+        row = tote.rows[i]
+        lid = self.frame._lid_for(tote, i)
+        defaults = getattr(self.frame._gen(), "_lid_defaults", {}) or {}
+        size = PillcaseOrder.lid_outline(defaults.get(lid)) if lid else None
         self._teach(out, LidMatch.shape_key(size), (row.get("colour_code") or "").upper(), lid,
-                    f.tote_key, f.row_keys[i])
+                    tote.key, tote.row_keys[i])
 
-    # ============================================================== dialog
-    def _select_row(self, member):
-        """Select a candidate's row in the list, loading its order if it is
-        not the one on show. Returns its row index, or None."""
-        f = self.frame
-        if member["tote_key"] != f.tote_key:
-            o = self.pool.order(member["tote_key"])
-            if o is None:
-                return None
-            f.load_order(o["scan"], o["mode"], o["rows"], identify=False)
-        i = member["row_index"]
-        iid = str(i)
-        if f.tree.exists(iid):
-            f.tree.selection_set(iid)
-            f.tree.focus(iid)
-            f.tree.see(iid)
-        return i
-
-    def _show(self, out, auto):
-        f = self.frame
-        if self._last is not None and not self._last.get("taught"):
-            pass        # replaced: an unconfirmed photo teaches nothing
-        self._last = out
-        res, match = out["res"], out["match"]
-        best = match.best
-        if best is None or (auto and res.lid is None):
-            # Scanned before the lid went in, most likely. After a scan that is
-            # normal, so it is only mentioned; asked for, it is shown.
-            f._status(_("Lid camera: no lid found. %s") % " ".join(res.warnings + match.warnings),
-                      error=not auto)
-            if not auto:
-                self._dialog_for(out, None)
+    # ============================================================= preview
+    def show_backdrop(self, lid, frame_mm):
+        """The photo of the lid on the bed, faintly under the preview of its
+        engraving on `lid` (frame `frame_mm`); nothing without one."""
+        canvas = getattr(getattr(self.app, "canvasFrame", None), "canvas", None)
+        if canvas is None or not hasattr(canvas, "setLidBackdrop"):
             return
-        if best.group.first["current"]:
-            self._select_row(best.group.first)
-        f._status(_("📷 Looks like %s - %d%% sure. Confirm to engrave.")
-                  % (LidMatch.describe_group(best.group), round(best.probability * 100)))
-        self._dialog_for(out, best)
-
-    def _dialog_for(self, out, chosen):
-        if self._dialog is not None:
+        out = self._fresh()
+        image = None
+        if out is not None and enabled() and backdrop_on() and frame_mm and None not in frame_mm:
             try:
-                self._dialog.destroy()
-            except Exception:
-                pass
-        res, match = out["res"], out["match"]
-        f = self.frame
-        d = self._dialog = Toplevel(f)
-        d.title(_("Lid Camera"))
-        d.transient(f.winfo_toplevel())
-        body = Frame(d, padx=12, pady=10)
-        body.pack(fill=BOTH, expand=YES)
+                from PIL import Image
+                res = out["res"]
+                flat = LidVision.flat_lid(res, load_corner())
+                if flat is not None:
+                    image = Image.fromarray(backdrop_image(
+                        flat, res.ppm, res.lid.length_is_min, frame_mm, backdrop_corner()), "RGBA")
+            except Exception as e:
+                print("[lidcam] no lid photo under the preview:", repr(e))
+        canvas.setLidBackdrop(image, frame_mm if image is not None else (0, 0))
 
-        top = Frame(body)
-        top.pack(side=TOP, fill=X)
-        img_lbl = Label(top)
-        img_lbl.pack(side=LEFT, anchor="n")
-        self._set_photo(img_lbl, res.annotated)
-
-        side = Frame(top, padx=10)
-        side.pack(side=LEFT, fill=BOTH, expand=YES)
-        state = {"match": chosen, "member": None}
-        head = StringVar()
-        conf = StringVar()
-        detail = StringVar()
-        Label(side, textvariable=head, font=("", 14, "bold"), anchor=W, justify=LEFT,
-              wraplength=420).pack(side=TOP, fill=X)
-        conf_lbl = Label(side, textvariable=conf, font=("", 12, "bold"), anchor=W)
-        conf_lbl.pack(side=TOP, fill=X)
-        Label(side, textvariable=detail, anchor=W, justify=LEFT, wraplength=420).pack(
-            side=TOP, fill=X, pady=(2, 4))
-        warnings = res.warnings + match.warnings
-        if warnings:
-            Label(side, text="\n".join(warnings), fg="red", anchor=W, justify=LEFT,
-                  wraplength=420, font=("", 9)).pack(side=TOP, fill=X)
-
-        # Which of the group's rows: lids that look the same differ only in
-        # their text (and order), which is the operator's call.
-        rows_box = LabelFrame(side, text=_("Engrave which?"), padx=4, pady=4)
-        row_var = StringVar()
-        row_pick = ttk.Combobox(rows_box, textvariable=row_var, state="readonly", width=48)
-        row_pick.pack(side=TOP, fill=X)
-
-        def member_label(c):
-            text = c["row"].get("engraving") or ""
-            where = "" if c["current"] else _("  (order %s)") % c["scan"]
-            return "%s%s" % (text, where)
-
-        def pick_member(event=None):
-            g = state["match"]
-            if g is None:
-                return
-            idx = row_pick.current()
-            state["member"] = g.group.members[max(0, idx)]
-
-        row_pick.bind("<<ComboboxSelected>>", pick_member)
-
-        def show(gm):
-            state["match"] = gm
-            if gm is None:
-                head.set(_("No lid recognised"))
-                conf.set("")
-                detail.set(_("Place the lid in the fixture where the camera can see it and "
-                             "the markers, then Retake."))
-                rows_box.pack_forget()
-                return
-            g = gm.group
-            head.set(LidMatch.describe_group(g))
-            p = gm.probability
-            conf.set(_("Confidence: %d%%") % round(p * 100))
-            conf_lbl.config(fg="#1a7f37" if p >= 0.8 else "#b26b00" if p >= LOW_CONFIDENCE else "red")
-            lines = []
-            if res.lid is not None:
-                lines.append(_("Measured %s") % LidVision.describe_size(res.lid)
-                             + ((_(", lid is %.1f x %.1f mm") % tuple(sorted(g.size))) if g.size else ""))
-            how = []
-            if gm.size_z is not None:
-                how.append(_("size %.1fσ off") % gm.size_z)
-            if gm.colour_from:
-                how.append(_("colour %s (%s)") % (
-                    "%.1fσ off" % gm.colour_z if gm.colour_z is not None else _("scored"),
-                    _("named lids") if gm.colour_from == "named lids" else _("thumbnail")))
-            if how:
-                lines.append(", ".join(how))
-            lines += gm.notes
-            detail.set("\n".join(lines))
-            labels = [member_label(c) for c in g.members]
-            row_pick.config(values=labels)
-            row_pick.current(0)
-            state["member"] = g.members[0]
-            rows_box.pack(side=TOP, fill=X, pady=(4, 0))
-            if g.first["current"]:
-                self._select_row(g.first)
-
-        # Every waiting lid, likeliest first.
-        lst = LabelFrame(body, text=_("Waiting lids, likeliest first"), padx=4, pady=4)
-        lst.pack(side=TOP, fill=BOTH, expand=YES, pady=(8, 0))
-        cols = ("odds", "lid", "colour", "waiting")
-        # Rows as tall as the text: the default height clips larger fonts.
-        try:
-            from tkinter import font as tkfont
-            line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
-            ttk.Style().configure("LidCam.Treeview", rowheight=line + 8)
-        except Exception:
-            pass
-        tv = ttk.Treeview(lst, columns=cols, show="headings", height=min(8, max(3, len(match.groups))),
-                          selectmode="browse", style="LidCam.Treeview")
-        for c, title, w in (("odds", _("Odds"), 60), ("lid", _("Lid"), 440),
-                            ("colour", _("Colour"), 160), ("waiting", _("Waiting"), 70)):
-            tv.heading(c, text=title)
-            tv.column(c, width=w, anchor="e" if c in ("odds", "waiting") else "w")
-        sb = Scrollbar(lst, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        tv.pack(side=LEFT, fill=BOTH, expand=YES)
-        sb.pack(side=RIGHT, fill=Y)
-        for k, gm in enumerate(match.groups):
-            g = gm.group
-            names = (LidMatch.shape_names(g.shape) if g.size else "") or g.first.get("lid") \
-                or g.first["row"].get("case_type") or g.first["row"].get("product_code") or "?"
-            tv.insert("", END, iid=str(k), values=(
-                "%d%%" % round(gm.probability * 100), names,
-                g.first["row"].get("colour_name") or g.colour, g.count))
-
-        def on_pick(event=None):
-            sel = tv.selection()
-            if sel:
-                show(match.groups[int(sel[0])])
-
-        tv.bind("<<TreeviewSelect>>", on_pick)
-        if match.method:
-            Label(body, fg="gray", font=("", 8), anchor=W, text=_(
-                "Colour judged by: %s%s. %d named lids.") % (
-                match.method, "" if match.method_hit is None else
-                _(" (right %d%% of the time lately)") % round(100 * match.method_hit),
-                len(self._learning.store.examples) if self._learning else 0)).pack(side=TOP, fill=X)
-
-        bar = Frame(body)
-        bar.pack(side=TOP, fill=X, pady=(10, 0))
-
-        def teach_pick():
-            gm, member = state["match"], state["member"]
-            if gm is None or member is None:
-                return None
-            self._teach(out, gm.group.shape, gm.group.colour, member["lid"],
-                        member["tote_key"], member["row_key"])
-            return member
-
-        def close():
-            d.destroy()
-            self._dialog = None
-
-        def confirm():
-            gm = state["match"]
-            if gm is None:
-                return
-            if gm.probability < LOW_CONFIDENCE and not messagebox.askyesno(
-                    _("Low Confidence"),
-                    _("The camera is only %d%% sure this is %s.\n\nEngrave it anyway?")
-                    % (round(gm.probability * 100), LidMatch.describe_group(gm.group)), parent=d):
-                return
-            member = teach_pick()
-            close()
-            if member is not None and self._select_row(member) is not None:
-                self._engrave()
-
-        def select_only():
-            member = teach_pick()
-            close()
-            if member is not None:
-                self._select_row(member)
-
-        def retake():
-            close()
-            self.identify()
-
-        go = Button(bar, text=_("✓ Confirm & Engrave"), command=confirm, bg="#4CAF50", fg="white",
-                    activebackground="#45a049", activeforeground="white", font=("", 12, "bold"))
-        go.pack(side=LEFT, fill=X, expand=YES, padx=(0, 3))
-        if not match.groups:
-            go.config(state="disabled")
-        Button(bar, text=_("Select Only"), command=select_only).pack(side=LEFT, padx=3)
-        Button(bar, text=_("Retake"), command=retake).pack(side=LEFT, padx=3)
-        Button(bar, text=_("Cancel"), command=close).pack(side=LEFT, padx=(3, 0))
-
-        if chosen is not None:
-            k = match.groups.index(chosen)
-            tv.selection_set(str(k))
-            tv.see(str(k))
-        show(chosen)
-        d.bind("<Escape>", lambda e: close())
-        f._gen()._fit_and_center(d)
-        go.focus_set()
-
-    def _engrave(self):
-        """Confirmed: Engrave Selected, then Align & Run."""
-        f = self.frame
-        if not f.prepare_selected():
-            return
-        page = f._page()
-        multipoint = getattr(page, "multipoint", None) if page is not None else None
-        if multipoint is None:
-            f._status(_("Ready - press Align & Run."))
-            return
-        multipoint.quick_align_run()
-
-    @staticmethod
-    def _set_photo(label, bgr):
-        if bgr is None:
-            return
-        try:
-            import cv2 as cv
-            from PIL import Image, ImageTk
-        except ImportError:
-            return
-        h, w = bgr.shape[:2]
-        scale = PREVIEW_WIDTH / float(w)
-        small = cv.resize(bgr, (PREVIEW_WIDTH, int(h * scale)), interpolation=cv.INTER_AREA)
-        photo = ImageTk.PhotoImage(Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB)))
-        label.config(image=photo)
-        label.image = photo     # Tk drops an image nobody holds
+    def show_preview(self):
+        """The G-code view, in place of the camera's photo."""
+        self.view.hide()
 
     # ======================================================= teaching tool
     def import_teaching(self, src=os.path.join(TEACHING_DIR, "examples")):
@@ -773,22 +775,23 @@ class Controller:
         body.pack(fill=BOTH, expand=YES)
 
         on = BooleanVar(value=enabled())
-        auto = BooleanVar(value=auto_after_scan())
-        scope = StringVar(value=candidate_scope())
+        watch = BooleanVar(value=watching())
+        backdrop = BooleanVar(value=backdrop_on())
+        corner_at = StringVar(value=backdrop_corner())
         mm = StringVar(value="%g" % marker_mm())
         scale = StringVar(value="%.4f" % size_scale())
         msg = StringVar()
 
         Checkbutton(body, text=_("Use the lid camera"), variable=on).grid(
             row=0, column=0, columnspan=2, sticky=W)
-        Checkbutton(body, text=_("Identify the lid as soon as a tote is scanned"),
-                    variable=auto).grid(row=1, column=0, columnspan=2, sticky=W)
-        Label(body, text=_("Lids to choose among:")).grid(row=2, column=0, sticky="e", padx=(0, 5))
-        sc = Frame(body)
-        sc.grid(row=2, column=1, sticky=W)
-        Radiobutton(sc, text=_("the tote on show"), variable=scope, value="tote").pack(side=TOP, anchor=W)
-        Radiobutton(sc, text=_("every order scanned here with lids waiting (%d h)") % ORDER_KEEP_H,
-                    variable=scope, value="all").pack(side=TOP, anchor=W)
+        Checkbutton(body, text=_("Watch for a lid being placed, and identify it"),
+                    variable=watch).grid(row=1, column=0, columnspan=2, sticky=W)
+        bd = Frame(body)
+        bd.grid(row=2, column=0, columnspan=2, sticky=W)
+        Checkbutton(bd, text=_("Show the lid's photo under its preview, fixture corner at the"),
+                    variable=backdrop).pack(side=LEFT)
+        ttk.Combobox(bd, textvariable=corner_at, values=BACKDROP_CORNERS, state="readonly",
+                     width=12).pack(side=LEFT, padx=(4, 0))
         Label(body, text=_("Marker size (mm):")).grid(row=3, column=0, sticky="e", padx=(0, 5), pady=4)
         Entry(body, textvariable=mm, width=8).grid(row=3, column=1, sticky=W)
         Label(body, text=_("The black square only, not its white border, as printed."),
@@ -913,9 +916,10 @@ class Controller:
         def calibrate_size():
             if busy_msg():
                 return
-            i, row_ = f._selected()
-            lid = f._lid_for(i) if row_ is not None else None
-            want = PillcaseOrder.lid_outline(self.pool._lid_defaults().get(lid)) if lid else None
+            tote, i, row_ = f._selected()
+            lid = f._lid_for(tote, i) if row_ is not None else None
+            defaults = getattr(f._gen(), "_lid_defaults", {}) or {}
+            want = PillcaseOrder.lid_outline(defaults.get(lid)) if lid else None
             if not want:
                 msg.set(_("Select a lid in the tote list, with its size configured, and "
                           "place that lid in the fixture first."))
@@ -1034,8 +1038,9 @@ class Controller:
                 return
             Utils.addSection(_SECTION)
             Utils.setBool(_SECTION, "enabled", on.get())
-            Utils.setBool(_SECTION, "autoAfterScan", auto.get())
-            Utils.setStr(_SECTION, "candidates", scope.get())
+            Utils.setBool(_SECTION, "watch", watch.get())
+            Utils.setBool(_SECTION, "backdrop", backdrop.get())
+            Utils.setStr(_SECTION, "backdropCorner", corner_at.get())
             Utils.setStr(_SECTION, "markerMM", "%g" % mm_v)
             Utils.setStr(_SECTION, "sizeScale", "%.4f" % scale_v)
             d.destroy()
