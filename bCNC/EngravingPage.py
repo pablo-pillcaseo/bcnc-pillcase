@@ -6,10 +6,14 @@ The loop at the machine:
      station tablet. A scan with nobody logged in lands here first.
   2. A tote/order scan is looked up in ShipHero and its lids are listed here,
      under the tote, alongside any other totes still open.
-  3. A lid placed in the fixture is identified by the lid camera (LidCamera),
-     which selects it here; or the engraver picks it.
-  4. Confirm Lid fills the G-code fields and generates the preview. The same
-     button, now Start Engraving, runs Align & Run.
+  3. The G-code view shows the lid camera's view of the bed (LidCamera). A lid
+     placed in the fixture is identified and selected here, and its preview
+     made at once: the engraving on a photo of that lid, beside a photo of the
+     same lid from the camera's library. Confirm & Engrave runs Align & Run.
+     Picking another lid here makes its preview instead, with the camera's
+     Retake / Save to Library beside it.
+  4. Without the camera, Confirm Lid fills the G-code fields and generates the
+     preview; the same button, now Confirm & Engrave, runs Align & Run.
   5. When that program finishes without error the lid is crossed off, a completion
      record is handed to EngravingLog, and the next lid is selected. A tote whose
      lids are all done closes by itself a moment later; Close Tote closes one
@@ -44,6 +48,9 @@ TOTE_CLOSE_MS = 5000
 # Keys typed into the lid list within this long before Enter are a barcode
 # scan, not a press of the engrave button.
 SCAN_KEYS_S = 1.0
+# The lid camera makes the selected lid's preview this long after the
+# selection settles.
+PREPARE_DELAY_MS = 300
 
 
 class OpenTote:
@@ -84,6 +91,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
         self.odds = {}              # (tote key, row key) -> the camera's odds
         self._armed = None          # (tote id, row): previewed, the button now starts it
         self._camera_prompt = None  # (text, colour) from the lid camera
+        self._prepare_job = None    # a preview to make for the lid on the bed (camera_ready)
         self._typed = ("", 0.0)     # keys typed into the list: a scan in progress
 
         self.active_job = None      # the lid last sent to SurfAlign from this list
@@ -709,6 +717,8 @@ class EngravingFrame(CNCRibbon.PageFrame):
             tote.noun, tote.scan, row.get("product_name") or "",
             row.get("sku") or _("no SKU"), row.get("rule") or ""))
         self.d_warnings.set("\n".join(row.get("warnings") or []))
+        if self.lidcam.lid_on_bed():
+            self.camera_ready()
 
     def _on_lid_override(self, event=None):
         tote, i, row = self._selected()
@@ -719,6 +729,8 @@ class EngravingFrame(CNCRibbon.PageFrame):
             tote.lid_override[i] = lid
             self._disarm()
             self._refresh_tree()
+            if self.lidcam.lid_on_bed():
+                self.camera_ready()
 
     def _on_list_key(self, event):
         if event.char and event.char.isprintable() and not event.state & 0x4:   # not Ctrl
@@ -750,13 +762,35 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self.select_row(self._iid(tote, tote.row_keys.index(best[1])),
                             focus=focus in (None, self.tree, self.scan_entry))
 
+    def camera_ready(self):
+        """A lid sits on the bed and a lid is selected: make its preview, once
+        the selection settles (arrowing through the list makes only the last)."""
+        if self._prepare_job is not None:
+            self.after_cancel(self._prepare_job)
+        self._prepare_job = self.after(PREPARE_DELAY_MS, self._prepare_for_camera)
+
+    def _prepare_for_camera(self):
+        self._prepare_job = None
+        tote, i, row = self._selected()
+        if row is None or not self.lidcam.lid_on_bed():
+            return
+        if self._armed == (tote.id, i):
+            self.lidcam.show_panel(tote, i)
+            return
+        if self.prepare_selected(quiet=True):
+            self._armed = (tote.id, i)
+            self._update_engrave_button()
+            self._update_prompt()
+
     def set_camera_prompt(self, text, colour="black"):
         self._camera_prompt = (text, colour) if text else None
         self._update_prompt()
 
     def _update_prompt(self):
-        if self._armed:
-            text, colour = _("Check the preview, then press Start Engraving."), "#1F3B57"
+        if self._armed and self._camera_prompt and self.lidcam.lid_on_bed():
+            text, colour = self._camera_prompt
+        elif self._armed:
+            text, colour = _("Check the preview, then press Confirm & Engrave."), "#1F3B57"
         elif not self.totes:
             text, colour = _("Scan a tote to list its engravings."), "black"
         elif self._camera_prompt:
@@ -780,7 +814,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
 
     def _update_engrave_button(self):
         if self._armed:
-            self.engrave_btn.config(text=_("▶  Start Engraving"), bg="#4CAF50",
+            self.engrave_btn.config(text=_("✓  Confirm & Engrave  ▶"), bg="#4CAF50",
                                     activebackground="#45a049")
         else:
             self.engrave_btn.config(text=_("✓  Confirm Lid  ▶"), bg="#2E75B6",
@@ -805,6 +839,11 @@ class EngravingFrame(CNCRibbon.PageFrame):
         if self.app.running or (page is not None and page.busy()):
             self._warn(_("The machine is running - wait for it to finish."))
             return
+        tote, i, row = self._selected()
+        if row is not None:
+            # A lid the camera picked by itself teaches it, now it is confirmed
+            self.lidcam.note_engraving(tote, i)
+        self.lidcam.view.hide_all()
         self._disarm()
         if multipoint is None:
             self._status(_("Ready - press Align & Run."))
@@ -812,9 +851,10 @@ class EngravingFrame(CNCRibbon.PageFrame):
         # A look at the bed still in flight finishes before probing starts.
         self.lidcam.when_idle(multipoint.quick_align_run)
 
-    def prepare_selected(self):
+    def prepare_selected(self, quiet=False):
         """Fill the G-code fields from the selected lid and generate its
-        preview, saying whether the G-code is ready to run."""
+        preview, saying whether the G-code is ready to run. `quiet`: made for
+        the lid camera, unasked - a lid already engraved is not offered again."""
         tote, i, row = self._selected()
         if row is None:
             self._warn(_("Select a case first."))
@@ -831,13 +871,10 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._warn(_("This case type is not mapped to any Lid. Pick one from the Lid dropdown."))
             return False
         key = tote.row_keys[i]
-        if key in self._completed(tote) and not messagebox.askyesno(
+        if key in self._completed(tote) and (quiet or not messagebox.askyesno(
                 _("Already Engraved"),
-                _("This lid is already marked as engraved.\n\nEngrave it again?"), parent=self):
+                _("This lid is already marked as engraved.\n\nEngrave it again?"), parent=self)):
             return False
-        # A photo of the lid on the bed teaches the camera that it is this
-        # lid, whether the camera picked it or the engraver did.
-        self.lidcam.note_engraving(tote, i)
 
         text = str(row.get("engraving"))
         gen = self._gen()
@@ -863,9 +900,12 @@ class EngravingFrame(CNCRibbon.PageFrame):
             self._status(_("GCode generation failed: ") + str(e), error=True)
             return False
         if ok:
-            self._status(_("Ready - check the preview for '%s' on %s, then press Start Engraving.")
+            self._status(_("Ready - check the preview for '%s' on %s, then press Confirm & Engrave.")
                          % (text, lid))
-            self.lidcam.show_preview()
+            if self.lidcam.lid_on_bed():
+                self.lidcam.show_panel(tote, i)
+            else:
+                self.lidcam.view.hide_all()
             if page is not None:
                 page.see(self.engrave_btn)
         else:
@@ -888,6 +928,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
     def on_run_started(self, program):
         """A run is starting. Only a program run of generated G-code can complete a lid."""
         self._disarm()
+        self.lidcam.view.hide_all()
         if program and self._generated:
             self._run = {"generated": self._generated, "engraver": self.session.engraver,
                          "started_at": ES.now_utc()}

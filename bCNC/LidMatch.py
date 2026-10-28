@@ -9,9 +9,10 @@ expected). So this is a choice among a known few, made the Bayesian way:
                and one Pink Mission Pill left, 3 to 1 before anything is seen
   size         how far the measured lid is from the size this camera measures
                for that shape (learned from named lids; the outline until then)
-  colour       how far it is from the colour's named lids (LidLearn, whichever
-               way has been most often right lately), or from its thumbnail
-               while that colour has none
+  colour       how far it is from the colour's named lids (LidLearn: network +
+               palette, unless another way has been clearly more often right;
+               best_colour_method), or from its thumbnail while that colour
+               has none
 
 Candidates are grouped by what the camera can tell apart: the lid's physical
 shape and its colour. Products whose lids are the same shape (Weekly Vitamin
@@ -49,9 +50,12 @@ THUMBNAIL_SIGMA_SCALE = 2.0
 # as this far off: between a typical right colour (about 1) and a typical
 # wrong one (3 and more). At 0 it would beat every colour that has evidence.
 UNKNOWN_COLOUR_Z = 2.0
-# Recent named lids looked at to choose the colour method.
-METHOD_WINDOW = 40
-METHOD_MIN = 15
+# Recent tests (named lids whose colour had been named before) looked at to
+# choose the colour method; tests each method needs before it is judged, and
+# how much more often another must be right to replace the network.
+METHOD_WINDOW = 50
+METHOD_MIN = 20
+METHOD_MARGIN = 0.10
 
 
 # ------------------------------------------------------------------- shapes
@@ -157,28 +161,59 @@ def learned_sizes(examples):
 
 
 # ------------------------------------------------------------------ colours
-def best_colour_method(examples, network):
-    """The colour method that has been right most often on the latest named
-    lids (by the guesses made at the time). Until there are enough, the best
-    one that can run."""
-    default = "all" if network is not None else "palette"
-    hits = {}
-    for e in examples[-METHOD_WINDOW:]:
+METHOD_NAMES = {
+    "colour": "Colour",
+    "palette": "Palette + pattern",
+    "network": "Network",
+    "all": "Network + palette",
+    "weighted": "Learned weights",
+    "trained": "Trained layer",
+}
+
+
+def method_ranking(examples, network=None):
+    """How often each colour method's guess, made before the engraver named
+    the lid, was the colour named: [(method, right, tested)] over the latest
+    METHOD_WINDOW tests, best first. A lid whose colour had no named lids
+    before it tests nothing: no method can name a colour it has never seen.
+    Methods that need the network are left out without one."""
+    seen = set()
+    tests = []
+    for e in examples:
         g = e.rec.get("guesses") or {}
-        ran = g.get("ran")
-        if e.measured is None or ran is None:
-            continue
-        for m in ran:
-            if m in LidLearn.COLOUR_METHODS:
+        if e.measured is not None and g.get("ran") is not None and e.colour in seen:
+            tests.append((e.colour, g))
+        seen.add(e.colour)
+    hits = {}
+    for colour, g in tests[-METHOD_WINDOW:]:
+        for m in g["ran"]:
+            if m in LidLearn.COLOUR_METHODS and (
+                    network is not None or "network" not in LidLearn.METHOD_KINDS.get(m, ())):
                 v = g.get(m)
-                hits.setdefault(m, []).append(bool(v) and v[0] == e.colour)
-    usable = {m: sum(v) / len(v) for m, v in hits.items()
-              if len(v) >= METHOD_MIN and (network is not None or
-                                           "network" not in LidLearn.METHOD_KINDS.get(m, ()))}
-    if not usable:
-        return default, None
-    m = max(usable, key=lambda k: (usable[k], k == default))
-    return m, usable[m]
+                hits.setdefault(m, []).append(bool(v) and v[0] == colour)
+    rows = [(m, sum(v), len(v)) for m, v in hits.items()]
+    rows.sort(key=lambda r: (-r[1] / r[2], -r[2]))
+    return rows
+
+
+def best_colour_method(examples, network):
+    """The colour method to use, and its recent hit rate (None until tested).
+
+    Network + palette (palette + pattern without the network) is used until
+    it and another method have both been tested on METHOD_MIN lids, and is
+    replaced only by a method right at least METHOD_MARGIN more often: a lucky
+    run on a few lids does not swap the method under the engraver."""
+    default = "all" if network is not None else "palette"
+    rates = {m: (right / n, n) for m, right, n in method_ranking(examples, network)}
+    base, base_n = rates.get(default, (None, 0))
+    if base is None or base_n < METHOD_MIN:
+        return default, base
+    better = [m for m, (rate, n) in rates.items()
+              if n >= METHOD_MIN and rate >= base + METHOD_MARGIN]
+    if not better:
+        return default, base
+    m = max(better, key=lambda k: rates[k][0])
+    return m, rates[m][0]
 
 
 def learned_colour_loglik(memory, feats, learned, method):

@@ -1,20 +1,24 @@
 """Lid camera for Tote Scanning: see the lid placed in the fixture, pick it in
-the list, and show it under its engraving.
+the list, and show its engraving on it.
 
 While lids are waiting to be engraved and the machine is idle, the camera on
-the BLTouch board looks at the bed every couple of seconds. A lid that appears
-and holds still for two looks is identified: LidVision finds and measures it,
-and LidMatch gives the odds of each lid waiting in the open totes (the
-candidates, below). The likeliest is selected in Tote Scanning's list, the odds
-are shown beside the lids, and the photo takes the place of the G-code view
-until the engraver confirms. The engraver confirms it there, or picks another
-lid; the preview then shows the engraving over a faint photo of this very lid.
-After the engraving the camera waits for the lid to be taken off before it
-looks for the next.
+the BLTouch board looks at the bed every couple of seconds, and its latest
+photo takes the place of the G-code view: the engraver sees the bed. A lid
+that appears and holds still for two looks is identified: LidVision finds and
+measures it, and LidMatch gives the odds of each lid waiting in the open totes
+(the candidates, below). The likeliest is selected in Tote Scanning's list and
+its preview made at once: the engraving over a faint photo of this very lid,
+with a panel beside it showing the lid's photo above one of the same lid from
+the library. One press of Confirm then engraves it. After the engraving the
+camera waits for the lid to be taken off before it looks for the next.
 
-Every engraving started from a photo teaches the camera (LidLearn): the lid's
-photo and crop are kept as a named lid, labelled with the lid the engraver
-confirmed, and the bare fixture round it updates the empty-bed map.
+The camera learns as it is used (LidLearn), never in a separate tool:
+  * A lid it was sure of - a colour it has named lids of, and the odds high -
+    is kept as a named lid when the engraver confirms it.
+  * A lid the engraver picked (the camera unsure, wrong, or with nothing to
+    compare with) gets Retake and Save to Library in the panel: the engraver
+    keeps the photo once it is a good one, labelled with the lid picked.
+Either way the bare fixture round the lid updates the empty-bed map.
 
 The candidates are the lids still to engrave in every open tote (Tote
 Scanning keeps several open at once), so a lid from any of them may be placed;
@@ -23,7 +27,7 @@ a lid engraved on another station drops out through the shared progress.
 Nothing here can delay probing:
   * No photo is taken while the machine runs, Align & Run is probing, Auto
     Setup is working, or a preview waits to be started. The check is made
-    before each photo, and Start Engraving waits for a photo in flight.
+    before each photo, and Confirm & Engrave waits for a photo in flight.
   * The capture and the vision run on a worker thread. The Tk thread only
     polls for the result, so the window never freezes either.
   * The capture shares the probe port's lock with the servo commands (see
@@ -43,7 +47,6 @@ Per-machine files, next to the bCNC ini:
 import atexit
 import json
 import os
-import shutil
 import threading
 import time
 import tkinter as tk
@@ -78,8 +81,9 @@ SAME_MM = 4.0
 SAME_COLOUR = 4.0
 # A photo stays the lid on the bed (and teaches the camera) this long.
 TEACH_BY_HAND_S = 300
-# Where the teaching tool (tools/lidcam_learn.py) keeps its lids.
-TEACHING_DIR = os.path.expanduser("~/lidcam")
+# The camera picks a lid by itself (and learns from it when confirmed) only
+# this sure, and only of a colour it has named lids of.
+SURE_P = 0.8
 # Where the fixture corner falls in the preview, for the photo under it.
 BACKDROP_CORNERS = ("top left", "top right", "bottom left", "bottom right")
 BACKDROP_PPM = 8.0
@@ -150,11 +154,8 @@ def save_corner(corner):
 
 def model_path():
     """The image network's file, wherever it was fetched to, or None."""
-    for folder in (_path("models"), os.path.join(TEACHING_DIR, "models")):
-        p = os.path.join(folder, LidLearn.MODEL_FILE)
-        if os.path.exists(p):
-            return p
-    return None
+    p = os.path.join(_path("models"), LidLearn.MODEL_FILE)
+    return p if os.path.exists(p) else None
 
 
 # ------------------------------------------------------------- the lid seen
@@ -263,10 +264,32 @@ class Learning:
 
 
 # ========================================================= the camera view
+def _tk_image(bgr, width, height):
+    """`bgr` scaled to fit width x height, as a Tk image (None if it cannot)."""
+    try:
+        import cv2 as cv
+        from PIL import Image, ImageTk
+    except ImportError:
+        return None
+    ih, iw = bgr.shape[:2]
+    k = min(width / float(iw), height / float(ih))
+    if k <= 0:
+        return None
+    small = cv.resize(bgr, (max(1, int(iw * k)), max(1, int(ih * k))), interpolation=cv.INTER_AREA)
+    return ImageTk.PhotoImage(Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB)))
+
+
 class CameraView:
-    """The camera's photo, in place of bCNC's G-code view: laid over that
-    canvas, so the one view shows the lid on the bed until it is confirmed,
-    then its engraving. A click on it shows the G-code view again."""
+    """The lid camera in bCNC's G-code view, laid over that canvas.
+
+    live(): the camera's latest photo over the whole view, while a lid is
+    awaited or could not be matched. A click on it shows the G-code view.
+    panel(): down the view's right side, beside the lid's preview: this lid's
+    photo above the same lid's from the library, and the engraver's buttons.
+    """
+
+    PANEL_WIDTH = 0.36      # of the view
+    BG = "#1e1e1e"
 
     def __init__(self, app):
         self.app = app
@@ -274,23 +297,33 @@ class CameraView:
         self.bgr = None
         self.caption = ("", "white")
         self._photo = None
+        self.box = None             # the panel
+        self._content = None        # what the panel shows (panel()'s arguments)
+        self._shown = 0             # counts panel() calls: each is new content
+        self._filled = None         # (content count, width) the panel was last filled for
+        self._photos = []
 
     def _target(self):
         return getattr(getattr(self.app, "canvasFrame", None), "canvas", None)
 
-    def show(self, bgr, caption, colour="white"):
+    def _raise(self, widget, target):
+        # Canvas.lift raises canvas items: the window itself is raised here.
+        widget.tk.call("raise", widget._w, target._w)
+
+    # --------------------------------------------------------------- live
+    def live(self, bgr, caption, colour="white"):
         target = self._target()
         if target is None or bgr is None:
             return
         if self.cv is None:
-            self.cv = tk.Canvas(target.master, highlightthickness=0, background="#1e1e1e",
+            self.cv = tk.Canvas(target.master, highlightthickness=0, background=self.BG,
                                 cursor="hand2")
             self.cv.bind("<Configure>", lambda e: self._render())
             self.cv.bind("<Button-1>", lambda e: self.hide())
+        self.hide_panel()
         self.bgr, self.caption = bgr, (caption, colour)
         self.cv.place(in_=target, x=0, y=0, relwidth=1, relheight=1)
-        # Canvas.lift raises canvas items: the window itself is raised here.
-        self.cv.tk.call("raise", self.cv._w, target._w)
+        self._raise(self.cv, target)
         self._render()
 
     def hide(self):
@@ -307,11 +340,6 @@ class CameraView:
         w, h = cv_.winfo_width(), cv_.winfo_height()
         if w < 20 or h < 20:
             return
-        try:
-            import cv2 as cv
-            from PIL import Image, ImageTk
-        except ImportError:
-            return
         cv_.delete("all")
         text, colour = self.caption
         top = cv_.create_text(10, 6, text=text, anchor="nw", fill=colour,
@@ -320,13 +348,77 @@ class CameraView:
                                text=_("Lid camera  ·  click for the G-code view"))
         y0 = cv_.bbox(top)[3] + 6
         y1 = cv_.bbox(foot)[1] - 4
-        ih, iw = self.bgr.shape[:2]
-        k = min(w / float(iw), (y1 - y0) / float(ih))
-        if k > 0:
-            small = cv.resize(self.bgr, (max(1, int(iw * k)), max(1, int(ih * k))),
-                              interpolation=cv.INTER_AREA)
-            self._photo = ImageTk.PhotoImage(Image.fromarray(cv.cvtColor(small, cv.COLOR_BGR2RGB)))
+        self._photo = _tk_image(self.bgr, w, y1 - y0)
+        if self._photo is not None:
             cv_.create_image(w // 2, (y0 + y1) // 2, image=self._photo)
+
+    # -------------------------------------------------------------- panel
+    def panel(self, caption, colour, this_lid, library, library_caption, note, actions=()):
+        """The panel beside the preview. `this_lid` / `library`: BGR crops
+        (long side across) or None; `actions`: [(text, command)] buttons."""
+        target = self._target()
+        if target is None:
+            return
+        if self.box is None:
+            self.box = tk.Frame(target.master, background=self.BG, padx=10, pady=8)
+            self.box.bind("<Configure>", lambda e: self._fill_panel())
+        self.hide()
+        self._content = (caption, colour, this_lid, library, library_caption, note, tuple(actions))
+        self._shown += 1
+        self.box.place(in_=target, relx=1.0, x=0, y=0, anchor="ne",
+                       relwidth=self.PANEL_WIDTH, relheight=1)
+        self._raise(self.box, target)
+        self._fill_panel()
+
+    def hide_panel(self):
+        if self.box is not None:
+            self.box.place_forget()
+        self._content = None
+
+    def hide_all(self):
+        self.hide()
+        self.hide_panel()
+
+    def _fill_panel(self):
+        box, content = self.box, self._content
+        if box is None or content is None:
+            return
+        caption, colour, this_lid, library, library_caption, note, actions = content
+        w = max(100, box.winfo_width() - 20)
+        # Refilling resizes the children, which reports the box's size again:
+        # refilled only for new content or a new width.
+        if self._filled == (self._shown, w):
+            return
+        self._filled = (self._shown, w)
+        for child in box.winfo_children():
+            child.destroy()
+        self._photos = []
+
+        def text(t, fg="#d0d0d0", font=("", 10), pady=(0, 4)):
+            tk.Label(box, text=t, fg=fg, bg=self.BG, font=font, justify="left", anchor="w",
+                     wraplength=w).pack(side="top", fill="x", pady=pady)
+
+        def picture(bgr, missing):
+            img = _tk_image(bgr, w, w * 0.6) if bgr is not None else None
+            if img is None:
+                text(missing, fg="#9a9a9a", font=("", 10, "italic"), pady=(0, 12))
+                return
+            self._photos.append(img)
+            tk.Label(box, image=img, bg=self.BG).pack(side="top", anchor="w", pady=(0, 12))
+
+        text(caption, fg=colour, font=("", 13, "bold"), pady=(0, 10))
+        text(_("This lid, on the bed"), fg="#9a9a9a", font=("", 9))
+        picture(this_lid, _("No photo of this lid."))
+        text(library_caption, fg="#9a9a9a", font=("", 9))
+        picture(library, _("No photo of this lid in the library yet."))
+        if note:
+            text(note, fg="#ffcc66")
+        if actions:
+            row = tk.Frame(box, bg=self.BG)
+            row.pack(side="top", fill="x", pady=(6, 0))
+            for label, command in actions:
+                tk.Button(row, text=label, command=command, font=("", 11, "bold"),
+                          padx=10, pady=4).pack(side="left", padx=(0, 8))
 
 
 # ========================================================== the controller
@@ -356,9 +448,28 @@ class Controller:
         self._empty_looks = 0
         self._retry_at = 0.0
         self._idle_waiters = []
+        self._keep_pick = False     # a retake: the engraver's pick stays selected
         frame.after(WATCH_MS, self._tick)
+        self._fetch_network()
         # A look still running in OpenCV when Python exits aborts the process.
         atexit.register(self._finish_look)
+
+    def _fetch_network(self):
+        """The image network, downloaded once in the background (14 MB): until
+        then, and without a connection, lids are matched without it."""
+        if not enabled() or model_path() is not None:
+            return
+
+        def run():
+            try:
+                LidLearn.fetch_model(_path("models"))
+            except Exception as e:
+                print("[lidcam] image network not fetched:", e)
+                return
+            with self._learning_lock:
+                self._learning = None       # rebuilt with the network on next use
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _finish_look(self, limit_s=10.0):
         job, t0 = self._job, time.time()
@@ -505,6 +616,7 @@ class Controller:
             self._present(self._last, rematch=True)
         elif not self.frame.waiting():
             self.frame.set_camera_prompt(None)
+            self.view.hide_all()
 
     def engraved(self):
         """The lid on the bed was just engraved: wait for it to be taken off."""
@@ -512,6 +624,7 @@ class Controller:
         self._last = None
         self._empty_looks = 0
         self.frame.show_odds({}, None)
+        self.view.hide_panel()
         if enabled():
             self.frame.set_camera_prompt(_("Take the engraved lid off, and place the next."))
 
@@ -552,6 +665,12 @@ class Controller:
         """What a look saw, on the Tk thread: a lid placed, taken off, swapped."""
         place = lid_place(res)
         prev, self._prev = self._prev, place
+        if not force and self.state == "empty" and self.frame.waiting():
+            # Live: the bed as it is now, until a lid is identified
+            self.view.live(res.annotated, _("📷 Place a lid from the order in the fixture.")
+                           if place is None else _("📷 Hold on - looking at the lid..."))
+            if place is None:
+                self.frame.set_camera_prompt(_("📷 Place a lid in the fixture."))
         if force:
             self._identify(shot, res, bed, place)
             return
@@ -568,7 +687,7 @@ class Controller:
     def _taken_off(self):
         self.state, self._on, self._last = "empty", None, None
         self.frame.show_odds({}, None)
-        self.view.hide()
+        self.view.hide_panel()
         self.frame.set_camera_prompt(_("📷 Place a lid in the fixture.") if self.frame.waiting()
                                      else None)
 
@@ -612,14 +731,16 @@ class Controller:
             out["guesses"] = LidLearn.guesses(memory, out["feats"], out["res"].lid, learned)
 
     def _present(self, out, rematch=False):
-        """Show what the camera made of the lid: the odds in the list, its
-        best guess selected, the photo in place of the G-code view."""
+        """Act on what the camera made of the lid: the odds in the list, its
+        best guess selected, and the frame told to make that lid's preview
+        (camera_ready), which brings up the panel (show_panel)."""
         f = self.frame
         if rematch:
             # The waiting lids changed under the photo: the odds again, quickly
             out["candidates"] = [c for c in candidates(f)]
             self._match(out)
         self._last = out
+        keep, self._keep_pick = self._keep_pick, False
         res, match = out["res"], out["match"]
         best = match.best
         warnings = res.warnings + match.warnings
@@ -627,30 +748,124 @@ class Controller:
             f.show_odds({}, None)
             text = _("📷 No lid found.") if res.lid is None else _("📷 Nothing waiting matches.")
             f.set_camera_prompt(text + " " + " ".join(warnings), "#b26b00")
-            self.view.show(res.annotated, text, "#ffcc66")
+            self.view.live(res.annotated, text, "#ffcc66")
             return
         odds = {}
         for gm in match.groups:
             for c in gm.group.members:
                 odds[(c["tote_key"], c["row_key"])] = gm.probability
         member = best.group.first
-        f.show_odds(odds, (member["tote_key"], member["row_key"]))
-        p = best.probability
-        colour = "#1a7f37" if p >= 0.8 else "#b26b00" if p >= 0.5 else "red"
-        noun = _("Tote") if member["mode"] == "Tote" else _("Order")
-        row = member["row"]
-        lid = "%s, %s" % (row.get("colour_name") or best.group.colour,
-                          row.get("case_type") or member["lid"] or "?")
-        f.set_camera_prompt(_("📷 %s - %d%% sure, %s %s. Confirm Lid, or pick another.")
-                            % (lid, round(100 * p), noun, member["scan"]), colour)
+        # A retake keeps the engraver's pick; otherwise the likeliest is picked
+        f.show_odds(odds, None if keep else (member["tote_key"], member["row_key"]))
+        if self.sure(out):
+            f.set_camera_prompt(_("📷 %s - %d%% sure. Check the preview, then Confirm.")
+                                % (LidMatch.describe_group(best.group), round(100 * best.probability)),
+                                "#1a7f37")
+        else:
+            f.set_camera_prompt(_("📷 Not sure which lid this is. Pick it in the list if the "
+                                  "selected one is wrong, then Save it to the library."), "#b26b00")
         if warnings:
             f.warn_var.set("\n".join(warnings))
-        self.view.show(res.annotated, _("%s  ·  %d%% sure  ·  %s %s  ·  '%s'") % (
-            lid, round(100 * p), noun, member["scan"], row.get("engraving") or ""),
-            {"#1a7f37": "#7ee787", "#b26b00": "#ffcc66"}.get(colour, "#ff7b72"))
         if not rematch:
             f._status(_("📷 Looks like %s - %d%% sure.") % (LidMatch.describe_group(best.group),
-                                                            round(100 * p)))
+                                                            round(100 * best.probability)))
+        f.camera_ready()
+
+    def sure(self, out=None, tote=None, i=None):
+        """Whether the camera is sure enough to pick the lid by itself: of a
+        colour it has named lids of, and SURE_P likely. With `tote`/`i`, also
+        that this is the lid it picked."""
+        out = out or self._fresh()
+        best = out["match"].best if out is not None else None
+        if best is None or best.colour_from != "named lids" or best.probability < SURE_P:
+            return False
+        if tote is None:
+            return True
+        key = (tote.key, tote.row_keys[i])
+        return any((c["tote_key"], c["row_key"]) == key for c in best.group.members)
+
+    def lid_on_bed(self):
+        """An identified lid sits on the bed, not yet engraved."""
+        return enabled() and self.state == "on" and self._fresh() is not None
+
+    # =============================================================== panel
+    def _library_crop(self, lid, colour):
+        """The newest named lid of this lid and colour (else of this colour):
+        (BGR crop, what it is) or (None, None)."""
+        L = self._learning
+        if L is None or not colour:
+            return None, None
+        try:
+            import cv2 as cv
+        except ImportError:
+            return None, None
+        with L.lock:
+            examples = list(L.store.examples)
+        for same_lid in (True, False):
+            for e in reversed(examples):
+                if e.colour != colour or (same_lid and e.size != lid) or e.measured is None:
+                    continue
+                crop = cv.imread(L.store._p("crops", e.id, ".png"))
+                if crop is not None:
+                    return crop, e.size
+        return None, None
+
+    def show_panel(self, tote, i):
+        """The panel beside the preview of row `i` of `tote` (just made): this
+        lid's photo above the library's, and Retake / Save to Library when
+        the engraver picked the lid rather than the camera."""
+        out = self._fresh()
+        if out is None:
+            self.view.hide_all()
+            return
+        row = tote.rows[i]
+        lid = self.frame._lid_for(tote, i)
+        colour = (row.get("colour_code") or "").upper()
+        name = "%s, %s" % (row.get("colour_name") or colour or "?", lid or "?")
+        library, library_lid = self._library_crop(lid, colour)
+        if library is None:
+            library_caption = _("In the library: nothing yet")
+        elif library_lid == lid:
+            library_caption = _("In the library: %s") % name
+        else:
+            library_caption = _("In the library: %s, %s (no %s yet)") % (
+                row.get("colour_name") or colour, library_lid, lid)
+        best = out["match"].best
+        p = round(100 * best.probability) if best is not None else 0
+        if self.sure(out, tote, i):
+            self.view.panel(_("%s  ·  %d%% sure") % (name, p), "#7ee787", out["crop"], library,
+                            library_caption, None)
+            return
+        if out.get("saved") == (tote.key, tote.row_keys[i]):
+            note = _("✓ Saved to the library as %s.") % name
+        elif best is not None and self.sure(out):
+            note = _("The camera thought this was %s. Picked by hand: Save the photo to "
+                     "teach the camera, or Retake it first.") % LidMatch.describe_group(best.group)
+        else:
+            note = _("Picked by hand: Save the photo to teach the camera this lid, or "
+                     "Retake it first (lid flat in the fixture, fully in view).")
+        actions = [(_("📷 Retake"), self.retake)]
+        if out.get("saved") != (tote.key, tote.row_keys[i]):
+            actions.append((_("Save to Library"), lambda: self.save_pick(tote, i)))
+        self.view.panel(name, "white", out["crop"], library, library_caption, note, actions)
+
+    def retake(self):
+        """A new photo of the lid on the bed, keeping the engraver's pick."""
+        self._keep_pick = True
+        self.look(force=True)
+        if self._job is None:       # no photo taken: nothing will clear it
+            self._keep_pick = False
+
+    def save_pick(self, tote, i):
+        """Keep the photo of the lid on the bed as row `i` of `tote`."""
+        out = self._fresh()
+        if out is None:
+            self.frame._warn(_("No photo of the lid on the bed to save - Retake it."))
+            return
+        self._teach_row(out, tote, i)
+        out["saved"] = (tote.key, tote.row_keys[i])
+        self.frame._status(_("📷 Saved to the library."))
+        self.show_panel(tote, i)
 
     # ============================================================ teaching
     def _teach(self, out, shape, colour, lid_name, tote_key=None, row_key=None):
@@ -687,9 +902,14 @@ class Controller:
 
     def note_engraving(self, tote, i):
         """The frame is about to engrave row `i` of `tote`, confirmed by the
-        engraver: the lid on the bed is that lid."""
+        engraver. A lid the camera picked by itself is kept as that lid; one
+        picked by hand is kept only by Save to Library."""
         out = self._fresh()
-        if out is None or out.get("taught"):
+        if out is not None and self.sure(out, tote, i):
+            self._teach_row(out, tote, i)
+
+    def _teach_row(self, out, tote, i):
+        if out.get("taught"):
             return
         row = tote.rows[i]
         lid = self.frame._lid_for(tote, i)
@@ -718,51 +938,6 @@ class Controller:
             except Exception as e:
                 print("[lidcam] no lid photo under the preview:", repr(e))
         canvas.setLidBackdrop(image, frame_mm if image is not None else (0, 0))
-
-    def show_preview(self):
-        """The G-code view, in place of the camera's photo."""
-        self.view.hide()
-
-    # ======================================================= teaching tool
-    def import_teaching(self, src=os.path.join(TEACHING_DIR, "examples")):
-        """Bring in the lids named in tools/lidcam_learn.py, and its fixture
-        corner and empty-bed map where this machine has none. Returns how many
-        lids."""
-        tool = os.path.dirname(src)
-        if load_corner() is None and os.path.exists(os.path.join(tool, "lid-corner.json")):
-            shutil.copy2(os.path.join(tool, "lid-corner.json"), _path("corner.json"))
-        if self.bed() is None:
-            bed = LidVision.load_bed(os.path.join(tool, "empty-bed-map"), os.path.join(tool, "empty-bed"))
-            if bed is not None:
-                self._set_bed(bed)
-        L = self.learning()
-        index = os.path.join(src, "examples.jsonl")
-        if not os.path.exists(index):
-            return 0
-        have = {e.id for e in L.store.examples}
-        added = 0
-        with L.lock, open(index) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if rec["id"] in have:
-                    continue
-                rec.setdefault("shape", LidMatch.shape_of_name(rec.get("size")))
-                rec.setdefault("source", "teaching tool")
-                for sub, ext in (("photos", ".jpg"), ("crops", ".png"), ("masks", ".png")):
-                    p = os.path.join(src, sub, rec["id"] + ext)
-                    if os.path.exists(p):
-                        shutil.copy2(p, os.path.join(L.store.folder, sub, rec["id"] + ext))
-                with open(L.store.index, "a") as out:
-                    out.write(json.dumps(rec) + "\n")
-                L.store.examples.append(LidLearn.Example(rec))
-                added += 1
-            L.store.load_features(L.network)
-            L.pair_cache.clear()
-            L.trainer = LidLearn.Trainer(L.outlines, L.pair_cache)
-        return added
 
     # ============================================================ settings
     def show_settings_dialog(self):
@@ -962,7 +1137,8 @@ class Controller:
         learnf = LabelFrame(body, text=_("What the camera has learned"), padx=6, pady=6)
         learnf.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         learn_state = StringVar(value=_("Named lids: loading..."))
-        Label(learnf, textvariable=learn_state, anchor=W, justify=LEFT).pack(side=TOP, fill=X)
+        Label(learnf, textvariable=learn_state, anchor=W, justify=LEFT,
+              font="TkFixedFont").pack(side=TOP, fill=X)
 
         def describe_learning():
             L = self._learning
@@ -970,11 +1146,24 @@ class Controller:
                 return
             ex = L.store.examples
             m, hit = LidMatch.best_colour_method(ex, L.network)
-            learn_state.set(_("Named lids: %d, %d colours. Colour judged by: %s%s.\n"
-                              "Image network: %s.") % (
-                len(ex), len({e.colour for e in ex}), m,
-                "" if hit is None else _(" (right %d%% lately)") % round(100 * hit),
-                _("in use") if L.network is not None else _("not fetched")))
+            lines = [_("Named lids: %d, %d colours. Image network: %s.") % (
+                len(ex), len({e.colour for e in ex}),
+                _("in use") if L.network is not None else _("not downloaded yet"))]
+            ranking = LidMatch.method_ranking(ex, L.network)
+            if ranking:
+                lines.append(_("Right first time, on lids of a colour named before:"))
+                for method, right, n in ranking:
+                    lines.append("  %s %-18s %3d%%  (%d of %d)" % (
+                        "▶" if method == m else " ", LidMatch.METHOD_NAMES.get(method, method),
+                        round(100 * right / n), right, n))
+            else:
+                lines.append(_("No method tested yet: a lid tests them once its colour has "
+                               "been named before."))
+            lines.append(_("In use: %s (switches only when another is right %d%% more often "
+                           "over %d lids).") % (LidMatch.METHOD_NAMES.get(m, m),
+                                                round(100 * LidMatch.METHOD_MARGIN),
+                                                LidMatch.METHOD_MIN))
+            learn_state.set("\n".join(lines))
 
         def load_learning():
             self._start(self.learning, lambda L: describe_learning(),
@@ -982,33 +1171,6 @@ class Controller:
 
         if self._job is None:
             load_learning()
-
-        def do_import():
-            if busy_msg():
-                return
-            msg.set(_("Importing the teaching tool's lids..."))
-            self._start(self.import_teaching, lambda n: (msg.set(_("Imported %d named lids.") % n),
-                                                         describe_learning()),
-                        lambda e: msg.set(_("Import failed: %s") % e))
-
-        def fetch_network():
-            if busy_msg():
-                return
-            if not messagebox.askokcancel(
-                    _("Image Network"),
-                    _("Download the image network (MobileNetV2, 14 MB, checked against its "
-                      "known hash)? Colour and pattern matching use it from then on."), parent=d):
-                return
-            msg.set(_("Downloading..."))
-
-            def work():
-                LidLearn.fetch_model(_path("models"))
-                with self._learning_lock:
-                    self._learning = None           # rebuilt with the network
-                return self.learning()
-
-            self._start(work, lambda L: (msg.set(_("Image network ready.")), describe_learning()),
-                        lambda e: msg.set(_("Download failed: %s") % e))
 
         def forget_colours():
             if messagebox.askyesno(_("Forget Colours"),
@@ -1019,9 +1181,6 @@ class Controller:
 
         row = Frame(learnf)
         row.pack(side=TOP, fill=X, pady=(4, 0))
-        Button(row, text=_("Import from Teaching Tool"),
-               command=lambda: (do_import(), d.after(3000, refresh_states))).pack(side=LEFT, padx=2)
-        Button(row, text=_("Get Image Network"), command=fetch_network).pack(side=LEFT, padx=2)
         Button(row, text=_("Forget Averaged Colours"), command=forget_colours).pack(side=LEFT, padx=2)
 
         Label(body, textvariable=msg, fg="DarkBlue", wraplength=460, justify=LEFT).grid(
