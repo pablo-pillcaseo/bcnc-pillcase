@@ -291,8 +291,9 @@ class CameraView:
     PANEL_WIDTH = 0.36      # of the view
     BG = "#1e1e1e"
 
-    def __init__(self, app):
+    def __init__(self, app, on_click=None):
         self.app = app
+        self.on_click = on_click    # the engraver clicked the live view away
         self.cv = None
         self.bgr = None
         self.caption = ("", "white")
@@ -319,12 +320,17 @@ class CameraView:
             self.cv = tk.Canvas(target.master, highlightthickness=0, background=self.BG,
                                 cursor="hand2")
             self.cv.bind("<Configure>", lambda e: self._render())
-            self.cv.bind("<Button-1>", lambda e: self.hide())
+            self.cv.bind("<Button-1>", lambda e: self._clicked())
         self.hide_panel()
         self.bgr, self.caption = bgr, (caption, colour)
         self.cv.place(in_=target, x=0, y=0, relwidth=1, relheight=1)
         self._raise(self.cv, target)
         self._render()
+
+    def _clicked(self):
+        self.hide()
+        if self.on_click is not None:
+            self.on_click()
 
     def hide(self):
         if self.cv is not None:
@@ -434,7 +440,9 @@ class Controller:
         self.frame = frame
         self.app = frame.app
         self.colours = LidVision.ColourMemory(_path("colours.json"))
-        self.view = CameraView(self.app)
+        self.view = CameraView(self.app, on_click=self._live_away)
+        self._live_off = False      # the live view clicked away, until the next scan
+        self._paused = False        # no looks at all (exposure calibration)
         self._thumb_colours = {}
         self._job = None            # worker in flight: {"thread", "result", "error", "done"}
         self._learning = None       # Learning, once loaded
@@ -593,17 +601,28 @@ class Controller:
             print("[lidcam] watch error:", repr(e))
         self.frame.after(delay, self._tick)
 
+    def _matching(self):
+        """Whether looks identify lids: watching, someone logged in, and lids
+        waiting (or one on the bed). Otherwise they only feed the live view."""
+        f = self.frame
+        return watching() and f.session.logged_in and (self.state == "on" or f.waiting())
+
+    def _live_away(self):
+        self._live_off = True
+
     def _watch(self):
         """One step of watching the bed; returns when to step again (ms)."""
         f = self.frame
-        if not (enabled() and watching()) or self._job is not None:
+        if not enabled() or self._job is not None or self._paused:
             return WATCH_MS
         if self.app.blt_serial is None or self.app.blt_has_camera is False \
                 or not LidVision.available():
             return WATCH_MS     # no camera here: Tote Scanning works as before
-        if not f.session.logged_in or f.armed() or time.time() < self._retry_at:
+        if f.armed() or time.time() < self._retry_at:
             return WATCH_MS
-        if self.state == "empty" and not f.waiting():
+        # With nothing to identify, looks are only for the live view: none
+        # once it has been clicked away.
+        if not self._matching() and self._live_off:
             return WATCH_MS
         if self.why_not() is not None:
             return WATCH_MS
@@ -612,6 +631,7 @@ class Controller:
 
     def totes_changed(self):
         """Totes were opened or closed: odds for lids no longer waiting go."""
+        self._live_off = False
         if self._last is not None and self.state == "on":
             self._present(self._last, rematch=True)
         elif not self.frame.waiting():
@@ -638,9 +658,8 @@ class Controller:
             if force:
                 f._warn(reason)
             return
-        if force and not f.waiting():
-            f._warn(_("Scan a tote first - there are no lids waiting to match."))
-            return
+        if force:
+            self._live_off = False
         bed, corner = self.bed(), load_corner()
         mm, scale = marker_mm(), size_scale()
         if force:
@@ -665,10 +684,14 @@ class Controller:
         """What a look saw, on the Tk thread: a lid placed, taken off, swapped."""
         place = lid_place(res)
         prev, self._prev = self._prev, place
-        if not force and self.state == "empty" and self.frame.waiting():
+        if not self._matching():
+            # Nothing to identify yet: the live view, to aim the camera by
+            self._show_live(res, self._setup_caption(res))
+            return
+        if self.state == "empty" and not force:
             # Live: the bed as it is now, until a lid is identified
-            self.view.live(res.annotated, _("📷 Place a lid from the order in the fixture.")
-                           if place is None else _("📷 Hold on - looking at the lid..."))
+            self._show_live(res, _("📷 Place a lid from the order in the fixture.")
+                            if place is None else _("📷 Hold on - looking at the lid..."))
             if place is None:
                 self.frame.set_camera_prompt(_("📷 Place a lid in the fixture."))
         if force:
@@ -683,6 +706,26 @@ class Controller:
         # A lid, still for two looks, that is not the one already on the bed
         if same_lid(place, prev) and not (self.state == "on" and same_lid(place, self._on)):
             self._identify(shot, res, bed, place)
+
+    def _show_live(self, res, caption):
+        if not self._live_off:
+            self.view.live(res.annotated, caption,
+                           "#ffcc66" if caption.startswith("⚠") else "white")
+
+    def _setup_caption(self, res):
+        """The live view's caption with nothing to identify: what to set up
+        next, else what to do to start."""
+        if res.plane is None:
+            return _("⚠ No markers in view - aim the camera so the printed markers round the "
+                     "fixture are in the picture.")
+        if self.bed() is None:
+            return _("⚠ No empty-bed photo yet - take every lid off, then Lid Camera… → "
+                     "Add Empty-Bed Photo.")
+        if not self.frame.session.logged_in:
+            return _("📷 Lid camera - log in and scan a tote to start.")
+        if not watching():
+            return _("📷 Lid camera - press Look Again to identify a lid.")
+        return _("📷 Lid camera - scan a tote to start.")
 
     def _taken_off(self):
         self.state, self._on, self._last = "empty", None, None
@@ -976,7 +1019,13 @@ class Controller:
         Label(body, text=_("Set by 'Calibrate Size' below; 1 means none."),
               font=("", 8, "italic"), fg="gray").grid(row=6, column=1, sticky=W)
 
-        def busy_msg():
+        def busy_msg(retry):
+            """Why `retry` cannot take its photo now, if it cannot. A live
+            view photo in flight is waited for, then `retry` runs."""
+            if self._job is not None:
+                msg.set(_("Waiting for the camera..."))
+                self.when_idle(retry)
+                return "waiting"
             r = self.why_not()
             if r:
                 msg.set(r)
@@ -1000,7 +1049,7 @@ class Controller:
         Label(bedf, textvariable=corner_state, anchor=W).pack(side=TOP, fill=X)
 
         def add_empty_bed():
-            if busy_msg():
+            if busy_msg(add_empty_bed):
                 return
             if not messagebox.askokcancel(
                     _("Empty-Bed Photo"),
@@ -1048,7 +1097,7 @@ class Controller:
                 msg.set(_("Empty-bed map cleared."))
 
         def set_corner():
-            if busy_msg():
+            if busy_msg(set_corner):
                 return
             if not messagebox.askokcancel(
                     _("Fixture Corner"),
@@ -1089,7 +1138,7 @@ class Controller:
             side=TOP, fill=X)
 
         def calibrate_size():
-            if busy_msg():
+            if busy_msg(calibrate_size):
                 return
             tote, i, row_ = f._selected()
             lid = f._lid_for(tote, i) if row_ is not None else None
@@ -1220,6 +1269,10 @@ class Controller:
         """The two-lid exposure calibration (LidExposure), in a small window."""
         import LidExposure
 
+        if self._job is not None:       # a live view photo: after it
+            msg.set(_("Waiting for the camera..."))
+            self.when_idle(lambda: self.calibrate_exposure(parent, msg))
+            return
         if self.why_not():
             msg.set(self.why_not())
             return
@@ -1229,6 +1282,9 @@ class Controller:
             return
         d = Toplevel(parent)
         d.title(_("Calibrate Exposure"))
+        # The live view's photos would be taken with the trial settings
+        self._paused = True
+        d.bind("<Destroy>", lambda e: setattr(self, "_paused", False) if e.widget is d else None)
         d.transient(parent)
         prompt = StringVar()
         Label(d, textvariable=prompt, font=("", 11, "bold"), justify=LEFT, anchor=W,
