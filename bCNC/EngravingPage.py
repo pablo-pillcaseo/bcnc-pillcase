@@ -905,7 +905,7 @@ class EngravingFrame(CNCRibbon.PageFrame):
             if self.lidcam.lid_on_bed():
                 self.lidcam.show_panel(tote, i)
             else:
-                self.lidcam.view.hide_all()
+                self.lidcam.view.hide_panel()
             if page is not None:
                 page.see(self.engrave_btn)
         else:

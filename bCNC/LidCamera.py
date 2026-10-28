@@ -282,10 +282,12 @@ def _tk_image(bgr, width, height):
 class CameraView:
     """The lid camera in bCNC's G-code view, laid over that canvas.
 
-    live(): the camera's latest photo over the whole view, while a lid is
-    awaited or could not be matched. A click on it shows the G-code view.
-    panel(): down the view's right side, beside the lid's preview: this lid's
-    photo above the same lid's from the library, and the engraver's buttons.
+    live(): the camera's latest photo over the whole view, kept up to date
+    while the camera watches the bed - also while a lid's panel is up, so the
+    view never freezes on one photo. A click on it shows the G-code view.
+    panel(): down the right side, over the live view: the photo the lid was
+    found in, the lid cut out of it, the same lid from the library, and the
+    engraver's buttons.
     """
 
     PANEL_WIDTH = 0.36      # of the view
@@ -312,7 +314,9 @@ class CameraView:
         widget.tk.call("raise", widget._w, target._w)
 
     # --------------------------------------------------------------- live
-    def live(self, bgr, caption, colour="white"):
+    def live(self, bgr, caption, colour="white", show=True):
+        """The latest photo; shown unless `show` is False (clicked away), but
+        kept, so showing it again needs no new photo."""
         target = self._target()
         if target is None or bgr is None:
             return
@@ -321,11 +325,20 @@ class CameraView:
                                 cursor="hand2")
             self.cv.bind("<Configure>", lambda e: self._render())
             self.cv.bind("<Button-1>", lambda e: self._clicked())
-        self.hide_panel()
         self.bgr, self.caption = bgr, (caption, colour)
-        self.cv.place(in_=target, x=0, y=0, relwidth=1, relheight=1)
-        self._raise(self.cv, target)
+        if not show:
+            return
+        if not self.shown():
+            self.cv.place(in_=target, x=0, y=0, relwidth=1, relheight=1)
+            self._raise(self.cv, target)
+            if self.panel_shown():
+                self._raise(self.box, self.cv)
         self._render()
+
+    def show_live(self):
+        """The live view again, with the last photo."""
+        if self.bgr is not None:
+            self.live(self.bgr, *self.caption)
 
     def _clicked(self):
         self.hide()
@@ -346,40 +359,53 @@ class CameraView:
         w, h = cv_.winfo_width(), cv_.winfo_height()
         if w < 20 or h < 20:
             return
+        # The panel covers the right of the view: the photo goes left of it
+        left = int(w * (1 - self.PANEL_WIDTH)) if self.panel_shown() else w
         cv_.delete("all")
         text, colour = self.caption
         top = cv_.create_text(10, 6, text=text, anchor="nw", fill=colour,
-                              font=("", 13, "bold"), width=w - 20)
-        foot = cv_.create_text(w - 10, h - 4, anchor="se", fill="#9a9a9a", font=("", 9),
-                               text=_("Lid camera  ·  click for the G-code view"))
+                              font=("", 13, "bold"), width=left - 20)
+        foot = cv_.create_text(left - 10, h - 4, anchor="se", fill="#9a9a9a", font=("", 9),
+                               text=_("Live camera  ·  click for the G-code view"))
         y0 = cv_.bbox(top)[3] + 6
         y1 = cv_.bbox(foot)[1] - 4
-        self._photo = _tk_image(self.bgr, w, y1 - y0)
+        self._photo = _tk_image(self.bgr, left, y1 - y0)
         if self._photo is not None:
-            cv_.create_image(w // 2, (y0 + y1) // 2, image=self._photo)
+            cv_.create_image(left // 2, (y0 + y1) // 2, image=self._photo)
 
     # -------------------------------------------------------------- panel
-    def panel(self, caption, colour, this_lid, library, library_caption, note, actions=()):
-        """The panel beside the preview. `this_lid` / `library`: BGR crops
-        (long side across) or None; `actions`: [(text, command)] buttons."""
+    def panel(self, caption, colour, snapshot, this_lid, library, library_caption, note,
+              actions=()):
+        """The panel. `snapshot`: the photo the lid was found in; `this_lid` /
+        `library`: BGR crops (long side across) or None; `actions`: [(text,
+        command)] buttons."""
         target = self._target()
         if target is None:
             return
         if self.box is None:
             self.box = tk.Frame(target.master, background=self.BG, padx=10, pady=8)
             self.box.bind("<Configure>", lambda e: self._fill_panel())
-        self.hide()
-        self._content = (caption, colour, this_lid, library, library_caption, note, tuple(actions))
+        self._content = (caption, colour, snapshot, this_lid, library, library_caption, note,
+                         tuple(actions))
         self._shown += 1
+        was_shown = self.panel_shown()
         self.box.place(in_=target, relx=1.0, x=0, y=0, anchor="ne",
                        relwidth=self.PANEL_WIDTH, relheight=1)
-        self._raise(self.box, target)
+        self._raise(self.box, self.cv if self.shown() else target)
         self._fill_panel()
+        if not was_shown:
+            self._render()          # the live photo moves left of the panel
+
+    def panel_shown(self):
+        return self.box is not None and self.box.winfo_manager() == "place"
 
     def hide_panel(self):
+        was_shown = self.panel_shown()
         if self.box is not None:
             self.box.place_forget()
         self._content = None
+        if was_shown:
+            self._render()          # the live photo takes the whole view again
 
     def hide_all(self):
         self.hide()
@@ -389,7 +415,7 @@ class CameraView:
         box, content = self.box, self._content
         if box is None or content is None:
             return
-        caption, colour, this_lid, library, library_caption, note, actions = content
+        caption, colour, snapshot, this_lid, library, library_caption, note, actions = content
         w = max(100, box.winfo_width() - 20)
         # Refilling resizes the children, which reports the box's size again:
         # refilled only for new content or a new width.
@@ -404,19 +430,21 @@ class CameraView:
             tk.Label(box, text=t, fg=fg, bg=self.BG, font=font, justify="left", anchor="w",
                      wraplength=w).pack(side="top", fill="x", pady=pady)
 
-        def picture(bgr, missing):
-            img = _tk_image(bgr, w, w * 0.6) if bgr is not None else None
+        def picture(bgr, missing, aspect):
+            img = _tk_image(bgr, w, w * aspect) if bgr is not None else None
             if img is None:
-                text(missing, fg="#9a9a9a", font=("", 10, "italic"), pady=(0, 12))
+                text(missing, fg="#9a9a9a", font=("", 10, "italic"), pady=(0, 10))
                 return
             self._photos.append(img)
-            tk.Label(box, image=img, bg=self.BG).pack(side="top", anchor="w", pady=(0, 12))
+            tk.Label(box, image=img, bg=self.BG).pack(side="top", anchor="w", pady=(0, 10))
 
-        text(caption, fg=colour, font=("", 13, "bold"), pady=(0, 10))
-        text(_("This lid, on the bed"), fg="#9a9a9a", font=("", 9))
-        picture(this_lid, _("No photo of this lid."))
+        text(caption, fg=colour, font=("", 13, "bold"), pady=(0, 8))
+        text(_("Snapshot the lid was found in"), fg="#9a9a9a", font=("", 9))
+        picture(snapshot, _("No snapshot."), 0.62)
+        text(_("The lid found, cut out"), fg="#9a9a9a", font=("", 9))
+        picture(this_lid, _("No lid cut out."), 0.3)
         text(library_caption, fg="#9a9a9a", font=("", 9))
-        picture(library, _("No photo of this lid in the library yet."))
+        picture(library, _("No photo of this lid in the library yet."), 0.3)
         if note:
             text(note, fg="#ffcc66")
         if actions:
@@ -424,7 +452,7 @@ class CameraView:
             row.pack(side="top", fill="x", pady=(6, 0))
             for label, command in actions:
                 tk.Button(row, text=label, command=command, font=("", 11, "bold"),
-                          padx=10, pady=4).pack(side="left", padx=(0, 8))
+                          padx=10, pady=4).pack(side="left", padx=(0, 8), pady=(0, 6))
 
 
 # ========================================================== the controller
@@ -443,6 +471,8 @@ class Controller:
         self.view = CameraView(self.app, on_click=self._live_away)
         self._live_off = False      # the live view clicked away, until the next scan
         self._paused = False        # no looks at all (exposure calibration)
+        self._ignored = False       # what is on the bed is the size of no waiting lid
+        self._panel_for = None      # (tote, i) the panel shows
         self._thumb_colours = {}
         self._job = None            # worker in flight: {"thread", "result", "error", "done"}
         self._learning = None       # Learning, once loaded
@@ -608,17 +638,33 @@ class Controller:
         return watching() and f.session.logged_in and (self.state == "on" or f.waiting())
 
     def _live_away(self):
+        """The live view was clicked away: the G-code view (the engraving
+        preview) until the panel's Live Camera, the next scan or Look Again."""
         self._live_off = True
+        self._refresh_panel()
+
+    def toggle_view(self):
+        """The panel's button: the live camera or the engraving preview."""
+        if self.view.shown():
+            self.view.hide()
+            self._live_off = True
+        else:
+            self._live_off = False
+            self.view.show_live()
+        self._refresh_panel()
+
+    def _refresh_panel(self):
+        if self._panel_for is not None and self.view.panel_shown():
+            self.show_panel(*self._panel_for)
 
     def _watch(self):
         """One step of watching the bed; returns when to step again (ms)."""
-        f = self.frame
         if not enabled() or self._job is not None or self._paused:
             return WATCH_MS
         if self.app.blt_serial is None or self.app.blt_has_camera is False \
                 or not LidVision.available():
             return WATCH_MS     # no camera here: Tote Scanning works as before
-        if f.armed() or time.time() < self._retry_at:
+        if time.time() < self._retry_at:
             return WATCH_MS
         # With nothing to identify, looks are only for the live view: none
         # once it has been clicked away.
@@ -636,7 +682,7 @@ class Controller:
             self._present(self._last, rematch=True)
         elif not self.frame.waiting():
             self.frame.set_camera_prompt(None)
-            self.view.hide_all()
+            self.view.hide_panel()
 
     def engraved(self):
         """The lid on the bed was just engraved: wait for it to be taken off."""
@@ -660,6 +706,7 @@ class Controller:
             return
         if force:
             self._live_off = False
+            self.view.show_live()
         bed, corner = self.bed(), load_corner()
         mm, scale = marker_mm(), size_scale()
         if force:
@@ -688,12 +735,18 @@ class Controller:
             # Nothing to identify yet: the live view, to aim the camera by
             self._show_live(res, self._setup_caption(res))
             return
-        if self.state == "empty" and not force:
-            # Live: the bed as it is now, until a lid is identified
-            self._show_live(res, _("📷 Place a lid from the order in the fixture.")
-                            if place is None else _("📷 Hold on - looking at the lid..."))
-            if place is None:
+        # Live: the bed as it is now, whatever was found on it before
+        if self.state == "empty" or self._ignored:
+            new_lid = place is not None and not (self._ignored and same_lid(place, self._on))
+            self._show_live(res, _("📷 Hold on - looking at the lid...") if new_lid
+                            else _("📷 Place a lid from the order in the fixture."))
+            if place is None and self.state == "empty":
                 self.frame.set_camera_prompt(_("📷 Place a lid in the fixture."))
+        elif self._last is not None:
+            self._show_live(res, _("📷 Live - the lid found is on the right. Swap it, and "
+                                   "the camera looks again."))
+        else:
+            self._show_live(res, _("📷 Take the engraved lid off, and place the next."))
         if force:
             self._identify(shot, res, bed, place)
             return
@@ -708,9 +761,8 @@ class Controller:
             self._identify(shot, res, bed, place)
 
     def _show_live(self, res, caption):
-        if not self._live_off:
-            self.view.live(res.annotated, caption,
-                           "#ffcc66" if caption.startswith("⚠") else "white")
+        self.view.live(res.annotated, caption, "#ffcc66" if caption.startswith("⚠") else "white",
+                       show=not self._live_off)
 
     def _setup_caption(self, res):
         """The live view's caption with nothing to identify: what to set up
@@ -729,6 +781,7 @@ class Controller:
 
     def _taken_off(self):
         self.state, self._on, self._last = "empty", None, None
+        self._ignored, self._panel_for = False, None
         self.frame.show_odds({}, None)
         self.view.hide_panel()
         self.frame.set_camera_prompt(_("📷 Place a lid in the fixture.") if self.frame.waiting()
@@ -743,6 +796,7 @@ class Controller:
                 refs[c["colour_key"]] = self._reference_colour(c["colour_key"],
                                                                c["row"].get("colour_name"))
         self.state, self._on = ("on", place) if place is not None else ("empty", None)
+        self._ignored = False
         self._start(lambda: self._analyse(shot, res, cands, refs, bed),
                     self._present,
                     lambda e: self.frame._status(_("Lid camera: %s") % e, error=True))
@@ -789,9 +843,19 @@ class Controller:
         warnings = res.warnings + match.warnings
         if res.lid is None or best is None:
             f.show_odds({}, None)
+            self._dismiss()
             text = _("📷 No lid found.") if res.lid is None else _("📷 Nothing waiting matches.")
             f.set_camera_prompt(text + " " + " ".join(warnings), "#b26b00")
-            self.view.live(res.annotated, text, "#ffcc66")
+            return
+        if best.size_z is not None and best.size_z > LidMatch.IMPLAUSIBLE_Z:
+            # The size of no waiting lid - a marker, tape, a fixture part: not
+            # a lid. Ignored while it stays put; the camera keeps looking.
+            f.show_odds({}, None)
+            self._dismiss()
+            self._ignored = True
+            f.set_camera_prompt(_("📷 Place a lid in the fixture. (Ignored something %s: the "
+                                  "size of no lid waiting.)") % LidVision.describe_size(res.lid),
+                                "#b26b00")
             return
         odds = {}
         for gm in match.groups:
@@ -813,6 +877,13 @@ class Controller:
             f._status(_("📷 Looks like %s - %d%% sure.") % (LidMatch.describe_group(best.group),
                                                             round(100 * best.probability)))
         f.camera_ready()
+
+    def _dismiss(self):
+        """Nothing identified after all: no panel, no lid on the bed."""
+        self._last, self._panel_for = None, None
+        self.view.hide_panel()
+        if self.frame.armed():
+            self.frame._disarm()
 
     def sure(self, out=None, tote=None, i=None):
         """Whether the camera is sure enough to pick the lid by itself: of a
@@ -859,8 +930,10 @@ class Controller:
         the engraver picked the lid rather than the camera."""
         out = self._fresh()
         if out is None:
-            self.view.hide_all()
+            self._panel_for = None
+            self.view.hide_panel()
             return
+        self._panel_for = (tote, i)
         row = tote.rows[i]
         lid = self.frame._lid_for(tote, i)
         colour = (row.get("colour_code") or "").upper()
@@ -875,9 +948,12 @@ class Controller:
                 row.get("colour_name") or colour, library_lid, lid)
         best = out["match"].best
         p = round(100 * best.probability) if best is not None else 0
+        snapshot = out["res"].annotated
+        toggle = (_("✎ Engraving Preview") if self.view.shown() else _("📷 Live Camera"),
+                  self.toggle_view)
         if self.sure(out, tote, i):
-            self.view.panel(_("%s  ·  %d%% sure") % (name, p), "#7ee787", out["crop"], library,
-                            library_caption, None)
+            self.view.panel(_("%s  ·  %d%% sure") % (name, p), "#7ee787", snapshot, out["crop"],
+                            library, library_caption, None, [toggle])
             return
         if out.get("saved") == (tote.key, tote.row_keys[i]):
             note = _("✓ Saved to the library as %s.") % name
@@ -890,7 +966,9 @@ class Controller:
         actions = [(_("📷 Retake"), self.retake)]
         if out.get("saved") != (tote.key, tote.row_keys[i]):
             actions.append((_("Save to Library"), lambda: self.save_pick(tote, i)))
-        self.view.panel(name, "white", out["crop"], library, library_caption, note, actions)
+        actions.append(toggle)
+        self.view.panel(name, "white", snapshot, out["crop"], library, library_caption, note,
+                        actions)
 
     def retake(self):
         """A new photo of the lid on the bed, keeping the engraver's pick."""
